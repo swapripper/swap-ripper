@@ -80,6 +80,7 @@ Owners set a max per payment, max per day, and allowed chains or recipients ([/l
 |---|---|
 | **One tool for every bill** | x402 (v1 and v2), Solana Pay, EIP-681, BIP21, payment links, JSON or plain English |
 | **Best price, checked** | Every payment is quoted on NEAR Intents and Relay at once, and the cheaper one wins. If one is down, the other takes over |
+| **No wallet? No problem** | Every payment includes a `wallet_link`: the user scans a QR code or taps *Open in wallet* and approves the exact payment on their phone |
 | **Fast when it matters** | `speed: "fast"` fills in about 1–5 seconds |
 | **Safe to retry** | Pass a `request_id` and a retry never pays twice |
 | **Test without money** | `test: true` gives a fake payment that completes in about 15 seconds |
