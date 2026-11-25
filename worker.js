@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "1.5.1";
+const VERSION = "1.5.2";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -1086,6 +1086,8 @@ function agentCard(origin) {
   };
 }
 
+const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7c3aed"/><stop offset="1" stop-color="#06b6d4"/></linearGradient></defs><rect width="64" height="64" rx="14" fill="url(#g)"/><path d="M36 8 18 36h12l-4 20 20-30H34z" fill="#fff"/></svg>`;
+
 function serverJson(origin) {
   return {
     $schema: "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
@@ -1093,6 +1095,7 @@ function serverJson(origin) {
     title: "Swap Ripper",
     description: "Cross-chain token swaps across 25+ blockchains for AI agents. Non-custodial, no API key.",
     version: VERSION,
+    icons: [{ src: `${origin}/icon.svg`, mimeType: "image/svg+xml", sizes: ["any"] }],
     remotes: [{ type: "streamable-http", url: `${origin}/mcp` }],
   };
 }
@@ -1101,7 +1104,7 @@ function landing(origin, c) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Swap Ripper: cross-chain swaps for AI agents (MCP)</title>
 <meta name="description" content="${DESCRIPTION}">
-<link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt">
+<link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt"><link rel="icon" href="/icon.svg" type="image/svg+xml">
 <style>:root{color-scheme:light dark}body{font:16px/1.6 system-ui,sans-serif;max-width:780px;margin:40px auto;padding:0 20px}
 code,pre{background:rgba(127,127,127,.15);border-radius:6px}pre{padding:12px;overflow:auto}code{padding:2px 5px}
 h1{margin-bottom:0}.sub{opacity:.75;margin-top:4px}.tag{display:inline-block;border:1px solid rgba(127,127,127,.4);border-radius:99px;padding:1px 10px;margin:2px;font-size:13px}
@@ -1249,6 +1252,7 @@ export default {
       }
       if (path === "/.well-known/agent.json" || path === "/.well-known/agent-card.json") { track(c, "view:agent_card"); return json(agentCard(origin)); }
       if (path === "/server.json") return json(serverJson(origin));
+      if (path === "/icon.svg" || path === "/favicon.svg" || path === "/favicon.ico") return new Response(ICON_SVG, { headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400", ...cors } });
       if (path === "/health") return json({ ok: true, version: VERSION, fee_bps: c.feeBps, fee_recipient_set: !!c.feeTo, api_key_set: !!c.jwt });
       if (path === "/") { track(c, "view:home"); return text(landing(origin, c), "text/html"); }
       if (path === "/pay") { track(c, url.searchParams.get("to") ? "view:pay_link" : "view:pay_builder"); return text(payPage(origin, url.searchParams), "text/html"); }
