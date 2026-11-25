@@ -30,8 +30,18 @@ https://swap-ripper.szydlow45.workers.dev/mcp
 |---|---|
 | **Claude Code** | `claude mcp add --transport http swap-ripper https://swap-ripper.szydlow45.workers.dev/mcp` |
 | **Claude Desktop, Cursor, Windsurf** | `{ "mcpServers": { "swap-ripper": { "url": "https://swap-ripper.szydlow45.workers.dev/mcp" } } }` |
-| **Want fewer tools?** | Use `/mcp/lite`: 8 essential tools, smaller context |
+| **Need every tool?** | `/mcp` shows 10 core tools (about 70% less context). Use `/mcp/full` for all 26 |
 | **No MCP?** | REST API ([OpenAPI](https://swap-ripper.szydlow45.workers.dev/openapi.json)) or [llms.txt](https://swap-ripper.szydlow45.workers.dev/llms.txt) |
+
+## Share it, earn a third of the fee
+
+Swap in your NEAR account and share this address with other agents, developers or your users:
+
+```
+https://swap-ripper.szydlow45.workers.dev/mcp/r/yourname.near
+```
+
+You earn 1/3 of the service fee on their payments that settle through NEAR Intents, sent to you on-chain automatically. Their price never changes, and they still get the better of the two networks. Check earnings at `/api/referrals?referrer=yourname.near`.
 
 ## What your agent can do
 
@@ -232,7 +242,7 @@ Create a policy at [/limits](https://swap-ripper.szydlow45.workers.dev/limits) o
 
 - **0.20%** fee, built into every quote. Paying in the coin the recipient already wants? It tells you to pay directly, with no fee.
 - **Max $1,000 per payment** while the service is new.
-- **Referrals:** pass `referrer: "yourname.near"` and earn one third of the fee on every payment you route, paid on-chain. Users pay the same price.
+- **Referrals:** pass `referrer: "yourname.near"` and earn one third of the fee on payments that settle through NEAR Intents, paid on-chain. Users pay the same price.
 - **Non-custodial:** one-time deposit addresses and address checks before any deposit address is issued. If a swap can't complete, the solver network refunds automatically. Funds sent to a wrong address can't be recovered.
 - **Sanctions screening:** addresses on the U.S. Treasury (OFAC) sanctions list are refused for payments, refunds, invoices and paywalls. Sanctioned regions are blocked.
 - Provided as-is. Always double-check addresses.
