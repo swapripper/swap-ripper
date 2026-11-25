@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "3.0.1";
+const VERSION = "3.0.2";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -592,6 +592,21 @@ function testStatus(dep) {
 
 async function routeSwapInner(c, a, src, dst, units, recipient, refund, usd, exactOutput) {
   const pol = await enforcePolicy(c, a, src, dst, recipient, Number(usd) || 0);
+  // Fail safe: reserve the spend BEFORE creating payment instructions; refuse if it can't be recorded.
+  if (pol) {
+    pol.key = `${a.test ? "pspendtest" : "pspend"}:${pol.p.id}:${today()}`;
+    try { await c.kv.put(pol.key, String(+(pol.spent + (Number(usd) || 0)).toFixed(2)), { expirationTtl: 3 * 86400 }); }
+    catch { throw new UserError("Spending limits can't be checked right now, so this payment was refused for safety. Try again shortly."); }
+    pol.reserved = true;
+  }
+  try {
+    return await routeSwapCore(c, a, src, dst, units, recipient, refund, usd, exactOutput, pol);
+  } catch (e) {
+    if (pol && pol.reserved) { try { await c.kv.put(pol.key, String(pol.spent), { expirationTtl: 3 * 86400 }); } catch { /* keep the safer, higher total */ } }
+    throw e;
+  }
+}
+async function routeSwapCore(c, a, src, dst, units, recipient, refund, usd, exactOutput, pol) {
   const slip = clampSlip(a.slippage_bps);
   const bps = effectiveBps(c, usd);
   const speed = String(a.speed || "").toLowerCase();
@@ -1007,9 +1022,7 @@ async function enforcePolicy(c, a, src, dst, recipient, usd) {
 async function recordPolicySpend(c, pol, usd, out, isTest = false) {
   if (!pol) return;
   try {
-    const key = `${isTest ? "pspendtest" : "pspend"}:${pol.p.id}:${today()}`;
-    const spent = Number((await c.kv.get(key)) || 0) + usd;
-    await c.kv.put(key, String(+spent.toFixed(2)), { expirationTtl: 3 * 86400 });
+    const spent = pol.spent + usd; // already reserved before payment instructions were created
     const lk = `plog:${pol.p.id}`;
     const log = JSON.parse((await c.kv.get(lk)) || "[]");
     log.unshift({ at: new Date().toISOString(), usd: +usd.toFixed(2), send: `${out.send_exactly} ${out.send_token && out.send_token.symbol}@${out.deposit_chain}`,
