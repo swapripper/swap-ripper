@@ -235,6 +235,4 @@ Create a policy at [/limits](https://swap-ripper.szydlow45.workers.dev/limits) o
 
 `worker.js` is a single-file Cloudflare Worker with no dependencies. Set `FEE_RECIPIENT`, `FEE_BPS` and the `ONECLICK_JWT` secret, and optionally bind a KV namespace as `STATS`. Relay routing needs `RELAY_API_KEY` and `RELAY_FEE_TO`.
 
-For people, not agents: [@IntentsSwapRipperBot](https://t.me/IntentsSwapRipperBot) on Telegram.
-
 MIT License
