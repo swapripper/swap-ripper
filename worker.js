@@ -3693,7 +3693,7 @@ const code=document.getElementById("code");
 const setTab=(k)=>{code.textContent=snippets[k];document.querySelectorAll(".tab").forEach(t=>t.setAttribute("aria-selected",t.dataset.k===k?"true":"false"));};
 document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setTab(t.dataset.k));setTab("claude");
 const ra=document.getElementById("refacct"),ru=document.getElementById("refurl");
-ra.oninput=()=>{const v=ra.value.trim().toLowerCase().replace(/[^a-z0-9._-]/g,"");ru.textContent=O+"/mcp/r/"+(v||"yourname.near");};
+ra.addEventListener("input",()=>{const v=ra.value.trim().toLowerCase().replace(/[^a-z0-9._-]/g,"");ru.textContent=O+"/mcp/r/"+(v||"yourname.near");});
 document.getElementById("refcopy").onclick=async(e)=>{try{await navigator.clipboard.writeText(ru.textContent);e.target.textContent="Copied";setTimeout(()=>e.target.textContent="Copy",1500);}catch{}};
 document.getElementById("copy").onclick=async(e)=>{try{await navigator.clipboard.writeText(document.getElementById("mcpurl").textContent);e.target.textContent="Copied";setTimeout(()=>e.target.textContent="Copy",1500);}catch{}};
 const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
