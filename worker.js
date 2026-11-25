@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "3.3.1";
+const VERSION = "3.3.2";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 1000; // per payment, kept low while the service is new
@@ -1504,11 +1504,15 @@ async function createPaymentLink(c, a) {
 // ---- anonymous usage counters (per day, counts only; no IPs or addresses stored)
 let PENDING = null; // set per request to ctx.waitUntil
 // Business events are always counted; high-volume events are sampled (1 in 4, weighted) to save KV writes.
-const TRACK_ALWAYS = /^(swaps_|fast_swaps|paywall|policies_|webhooks_|links_created|pay_requests|x402_funds|mcp_connects|view:)/;
+// Money events are counted exactly. High-volume events (agent connections, page views) are sampled 1 in 10,
+// everything else 1 in 4: the free tier allows only 1,000 storage writes a day.
+const TRACK_ALWAYS = /^(swaps_|fast_swaps|paywall|policies_|webhooks_|links_created|pay_requests|x402_funds)/;
+const TRACK_HIGH = /^(mcp_connects|view:|rest:payany$)/;
 function track(c, event) {
   if (!c.kv) return;
   let weight = 1;
-  if (!TRACK_ALWAYS.test(event)) { if (Math.random() >= 0.25) return; weight = 4; }
+  if (TRACK_HIGH.test(event)) { if (Math.random() >= 0.1) return; weight = 10; }
+  else if (!TRACK_ALWAYS.test(event)) { if (Math.random() >= 0.25) return; weight = 4; }
   const day = new Date().toISOString().slice(0, 10);
   const job = (async () => {
     try {
