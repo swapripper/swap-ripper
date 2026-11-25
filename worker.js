@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "3.6.1";
+const VERSION = "3.6.2";
 // Friendly message when the free storage tier's daily write limit is used up.
 const friendlyError = (e) => (e instanceof UserError ? e.message : /limit exceeded|KV put|429/i.test(String(e && e.message)) ?
   "This feature needs to save data and today's storage limit is used up. It resets at 00:00 UTC. Quotes and payments without spending limits still work." :
@@ -2654,7 +2654,20 @@ async function usageStats(c, days = 14) {
     const v = await c.kv.get(`cl:${d}`);
     if (v) clients.push({ day: d, first_seen: JSON.parse(v) });
   }
-  return { enabled: true, window_days: days, totals, by_day: out, clients_by_day: clients, all_time_swaps_created: all.swaps, all_time_volume_usd: all.usd };
+  // Rough storage-write estimate per UTC day (free plan: 1,000/day). Stats writes are estimated from the
+  // sampling rates; payment records add a few writes each. Once the limit is hit, counts stop growing.
+  for (const r of out) {
+    let w = 0;
+    for (const [k, v] of Object.entries(r)) {
+      if (k === "day" || typeof v !== "number") continue;
+      w += TRACK_ALWAYS.test(k) ? v : TRACK_HIGH.test(k) ? v / 10 : v / 4;
+      if (/^(swaps_created|fast_swaps|test_swaps|links_created|paywalls_created|paywall_packs_started|policies_created)$/.test(k)) w += v * 2;
+    }
+    const cl = clients.find((x) => x.day === r.day);
+    if (cl) w += Object.keys(cl.first_seen).length;
+    r.est_storage_writes = Math.round(w);
+  }
+  return { enabled: true, window_days: days, storage_writes_limit_per_day: 1000, totals, by_day: out, clients_by_day: clients, all_time_swaps_created: all.swaps, all_time_volume_usd: all.usd };
 }
 
 // ---- who is connecting: MCP clients announce their app name (clientInfo.name) on connect.
