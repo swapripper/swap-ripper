@@ -18,10 +18,10 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "3.2.2";
+const VERSION = "3.3.0";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
-const MAX_USD = 25000;
+const MAX_USD = 1000; // per payment, kept low while the service is new
 const BLOCKED_COUNTRIES = new Set(["CU", "IR", "KP", "SY", "RU", "BY"]); // sanctioned / high-risk
 
 const CHAIN_ALIASES = {
@@ -61,7 +61,8 @@ const INSTRUCTIONS =
   "returns a deposit address. 4) The agent's wallet sends EXACTLY amount_in of the source token to " +
   "deposit_address on the source chain before the deadline (include deposit_memo if present). " +
   "5) Call get_swap_status with wait_seconds=25 until final=true. Amounts are human-readable decimals " +
-  "(e.g. '25.5'), never base units. Never send funds to a deposit address after its deadline.";
+  "(e.g. '25.5'), never base units. Never send funds to a deposit address after its deadline. " +
+  "Max $" + MAX_USD.toLocaleString("en-US") + " per payment. Using Swap Ripper means accepting its Terms of Service (/terms): it is non-custodial software provided as-is, and you are responsible for the addresses and amounts you use.";
 
 // ------------------------------------------------------------------ helpers
 const cors = {
@@ -264,7 +265,7 @@ function cleanReferrer(c, r) {
 const TIERS = [[10000, 15], [1000, 25]]; // [min USD, max bps]
 function discountText(c) {
   const parts = [`${(c.feeBps / 100).toFixed(2)}% standard`];
-  for (const [min, cap] of [...TIERS].reverse()) if (cap < c.feeBps) parts.push(`${(cap / 100).toFixed(2)}% over $${min.toLocaleString("en-US")}`);
+  for (const [min, cap] of [...TIERS].reverse()) if (cap < c.feeBps && min < MAX_USD) parts.push(`${(cap / 100).toFixed(2)}% over $${min.toLocaleString("en-US")}`);
   return parts.join(", ");
 }
 function effectiveBps(c, usd) {
@@ -446,6 +447,7 @@ function fastReply(c, a, src, dst, f, recipient, refund) {
       "Then call get_swap_status with this deposit_address, route='fast' and wait_seconds=25 until final=true.",
       "If anything fails, funds are refunded to refund_address automatically.",
     ],
+    terms: `${c.origin}/terms`,
   };
 }
 async function fetchFastStatus(c, a) {
@@ -541,6 +543,7 @@ function depositReply(c, a, src, dst, qq, recipient, refund) {
       "Then call get_swap_status with this deposit_address and wait_seconds=25 until final=true.",
       "If the deposit is short or late, funds are refunded to refund_address automatically.",
     ],
+    terms: `${c.origin}/terms`,
   };
 }
 
@@ -2179,7 +2182,8 @@ function llmsTxt(origin, c) {
 
 > ${DESCRIPTION}
 
-- Service fee: ${discountText(c)}, built into quotes. No API key. No sign-up. Non-custodial.
+- Service fee: ${discountText(c)}, built into quotes. No API key. No sign-up. Non-custodial. Max $${MAX_USD.toLocaleString("en-US")} per payment.
+- Terms of Service: ${origin}/terms (as-is software; you are responsible for addresses and amounts).
 - Referral program: pass referrer=<your NEAR account> on any call and earn 1/3 of the fee on swaps you route. Same price for the user.
 
 ## Connect
@@ -2377,7 +2381,7 @@ footer a{color:var(--soft)}
 <details><summary>REST endpoints and docs</summary><ul class="small"><li>OpenAPI spec: <a href="/openapi.json">/openapi.json</a></li><li>Agent card: <a href="/.well-known/agent.json">/.well-known/agent.json</a></li><li>Official MCP Registry: <a href="https://registry.modelcontextprotocol.io/v0/servers?search=swap-ripper">io.github.swapripper/swap-ripper</a></li></ul></details>
 </div></section>
 
-<footer><div class="wrap">Swap Ripper runs on the NEAR Intents and Relay solver networks. Open source (MIT) on <a href="https://github.com/swapripper/swap-ripper">GitHub</a>. Not available in sanctioned jurisdictions; crypto sent to a wrong address can't be recovered.</div></footer>
+<footer><div class="wrap">Swap Ripper runs on the NEAR Intents and Relay solver networks. Open source (MIT) on <a href="https://github.com/swapripper/swap-ripper">GitHub</a>. Not available in sanctioned jurisdictions; crypto sent to a wrong address can't be recovered. Max $1,000 per payment. <a href="/terms">Terms of Service</a>.</div></footer>
 
 <script>
 const O=${JSON.stringify(origin)};
@@ -2424,6 +2428,78 @@ const PAY_WITH = [
   ["NEAR", "near"], ["ZEC", "zec"], ["DOGE", "doge"], ["XRP", "xrp"], ["TRX", "tron"], ["TON", "ton"], ["SUI", "sui"],
 ];
 
+function termsPage(origin) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Terms of Service · Swap Ripper</title><link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="description" content="Terms of Service and risk notice for Swap Ripper, non-custodial payment software for AI agents.">
+<style>:root{color-scheme:light dark;--b:rgba(127,127,127,.35)}*{box-sizing:border-box}body{font:16px/1.6 system-ui,sans-serif;max-width:720px;margin:32px auto;padding:0 18px}
+h1{font-size:28px;margin:0 0 4px}h2{font-size:18px;margin:28px 0 6px}p,li{max-width:68ch}.muted{opacity:.7;font-size:14px}
+.box{border:1px solid var(--b);border-radius:12px;padding:14px 18px;background:rgba(255,170,0,.10)}a{color:inherit}</style></head><body>
+<p class="muted"><a href="/">Swap Ripper</a></p>
+<h1>Terms of Service</h1>
+<p class="muted">Last updated: November 25, 2026</p>
+
+<div class="box"><b>The short version.</b>
+<ul>
+<li>Swap Ripper is software. It never holds your money. Payments run through third-party networks (NEAR Intents and Relay).</li>
+<li>Crypto payments can't be reversed. If you or your agent send to a wrong address, the money is gone, and we can't get it back.</li>
+<li>You are responsible for every address, amount, token and chain you use, and for what your AI agents do.</li>
+<li>The service is provided as-is, with no guarantees. Our liability is limited to the fee you paid us.</li>
+<li>Payments are limited to $${MAX_USD.toLocaleString("en-US")} each while the service is new.</li>
+</ul></div>
+
+<h2>1. Agreement</h2>
+<p>By using Swap Ripper (the website at ${origin}, its MCP server, REST API, payment links, paywall gateway and related tools, together "the Service"), you agree to these Terms. If you use the Service through an AI agent, you agree for yourself and are responsible for that agent's actions. If you don't agree, don't use the Service.</p>
+
+<h2>2. What the Service is</h2>
+<p>Swap Ripper is non-custodial software that helps you request quotes, create payment instructions and track payments across blockchains. Payments are executed by independent third-party networks, currently NEAR Intents (1Click) and Relay. Swap Ripper never takes custody of, controls, or has the ability to move your funds. Swap Ripper is not a bank, exchange, broker, money transmitter, escrow agent or financial adviser, and nothing it provides is financial, legal or tax advice.</p>
+
+<h2>3. Your responsibilities</h2>
+<ul>
+<li>Check every recipient address, refund address, amount, token and chain before sending funds. Send exactly the stated amount to the stated deposit address before its deadline.</li>
+<li>Keep your wallets, keys and spending-policy admin keys safe. We can't recover them.</li>
+<li>If you let an AI agent use the Service, you are responsible for its instructions, its spending and any bills it chooses to pay. Use spending limits where possible.</li>
+<li>You are responsible for any taxes that apply to your transactions.</li>
+</ul>
+
+<h2>4. Risks you accept</h2>
+<ul>
+<li><b>Irreversible payments.</b> Blockchain transactions are final. Funds sent to a wrong or incompatible address, on the wrong chain, or in the wrong token may be permanently lost.</li>
+<li><b>Third-party networks.</b> Execution, timing and automatic refunds depend on networks we don't control. They may be delayed, fail, change their terms, or be unavailable.</li>
+<li><b>Prices.</b> Quotes are estimates and can change. Final amounts may differ within the stated minimums.</li>
+<li><b>Software errors.</b> The Service may contain bugs, misread a payment request, or be unavailable. Use test mode and small amounts first.</li>
+<li><b>Bills and sellers.</b> We don't verify the people, agents or APIs you pay, or what they deliver.</li>
+</ul>
+
+<h2>5. Fees</h2>
+<p>A service fee (currently 0.20%) is built into quotes and shown before you pay. Network and solver costs are included in quotes. Fees are not refundable once a payment completes.</p>
+
+<h2>6. Selling access (paywalls) and payment links</h2>
+<p>If you create a paywall or payment link, you are responsible for the API, goods or services you sell, for having the right to sell them, and for complying with the law. Payments go directly to your wallet. We may disable any paywall or listing at any time.</p>
+
+<h2>7. Prohibited use</h2>
+<p>You may not use the Service if you are a sanctioned person or located in a sanctioned or embargoed jurisdiction, or for money laundering, terrorist financing, fraud, scams, ransomware, sanctions evasion, or any other illegal purpose. You may not attack, overload or try to break the Service. We may block any address, request, paywall or user at our discretion.</p>
+
+<h2>8. No warranties</h2>
+<p>THE SERVICE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, ACCURACY OR AVAILABILITY.</p>
+
+<h2>9. Limitation of liability</h2>
+<p>TO THE FULLEST EXTENT PERMITTED BY LAW, SWAP RIPPER AND ITS OPERATOR ARE NOT LIABLE FOR ANY LOST FUNDS, LOST PROFITS, OR INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL OR PUNITIVE DAMAGES, INCLUDING LOSSES CAUSED BY THIRD-PARTY NETWORKS, BLOCKCHAINS, WRONG ADDRESSES, AI AGENTS, OR SOFTWARE ERRORS. OUR TOTAL LIABILITY FOR ANY CLAIM IS LIMITED TO THE SERVICE FEES YOU PAID US FOR THE TRANSACTION THAT GAVE RISE TO THE CLAIM, AND IN NO CASE MORE THAN US $100.</p>
+
+<h2>10. Indemnity</h2>
+<p>You agree to cover any claims, losses or costs (including reasonable legal fees) brought against Swap Ripper or its operator that arise from your use of the Service, your AI agents, anything you sell through it, or your breach of these Terms or the law.</p>
+
+<h2>11. Changes and termination</h2>
+<p>We may change, suspend or stop the Service, or update these Terms, at any time. The date at the top shows the latest version. Continuing to use the Service means you accept the updated Terms.</p>
+
+<h2>12. Governing law</h2>
+<p>These Terms are governed by the laws of the State of Wisconsin, USA, without regard to conflict-of-law rules. If any part of these Terms is unenforceable, the rest stays in effect.</p>
+
+<h2>13. Contact</h2>
+<p>Questions or problems: open an issue on <a href="https://github.com/swapripper/swap-ripper/issues">GitHub</a>.</p>
+</body></html>`;
+}
+
 function sellPage() {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sell your API to AI agents, paid in any crypto · Swap Ripper</title><link rel="icon" href="/icon.svg" type="image/svg+xml">
@@ -2446,7 +2522,7 @@ button{background:#5b5bf0;color:#fff;border:none;margin-top:16px;cursor:pointer;
 <label>Optional secret header for your API</label><input id="hd" placeholder="Authorization: Bearer your-key">
 <label class="chk"><input type="checkbox" id="ls" checked> List it in the public directory agents search</label>
 <label class="chk"><input type="checkbox" id="ts"> Test mode (free fake payments, for trying it out)</label>
-<button id="mk">Create paywall</button><div id="out"></div></div>
+<button id="mk">Create paywall</button><p class="muted">By creating a paywall you agree to the <a href="/terms">Terms of Service</a>. You are responsible for the API you sell.</p><div id="out"></div></div>
 <div class="card"><h2>Your sales</h2><label>Paywall ID</label><input id="sid" placeholder="pw_..."><label>Admin key</label><input id="sak" type="password" placeholder="adm_...">
 <div class="row"><button class="sec" id="st">Show stats</button><button class="sec" id="off">Switch OFF</button><button class="sec" id="on">Switch ON</button></div><div id="sout"></div></div>
 <div class="card"><h2>How agents buy</h2><ol><li>They call your gateway URL and get a <b>402</b> with instructions.</li><li>They buy a pack with any coin (Swap Ripper's <code>pay</code> tool does it in one step).</li><li>They call again with their access key; requests are forwarded to your API with credits counted down.</li></ol>
@@ -2471,7 +2547,7 @@ const show=(j)=>{const o=document.getElementById("sout");if(j.error){o.innerHTML
 document.getElementById("st").onclick=async()=>show(await (await fetch("/api/paywall_stats?"+new URLSearchParams({paywall_id:v("sid"),admin_key:v("sak")}))).json());
 document.getElementById("off").onclick=async()=>show(await post("/api/paywall_enabled",{paywall_id:v("sid"),admin_key:v("sak"),enabled:false}));
 document.getElementById("on").onclick=async()=>show(await post("/api/paywall_enabled",{paywall_id:v("sid"),admin_key:v("sak"),enabled:true}));
-</script></body></html>`;
+</script><p class="muted" style="margin-top:28px;font-size:13px;opacity:.65">Non-custodial software, provided as-is. Check every address before you send; crypto sent to a wrong address can\'t be recovered. <a href="/terms">Terms of Service</a></p></body></html>`;
 }
 
 function limitsPage() {
@@ -2514,7 +2590,7 @@ const show=(j)=>{const o=document.getElementById("sout");if(j.error){o.innerHTML
 document.getElementById("st").onclick=async()=>show(await (await fetch("/api/policy?"+new URLSearchParams({policy_id:v("sid"),admin_key:v("sak")}))).json());
 document.getElementById("off").onclick=async()=>show(await post("/api/policy_enabled",{policy_id:v("sid"),admin_key:v("sak"),enabled:false}));
 document.getElementById("on").onclick=async()=>show(await post("/api/policy_enabled",{policy_id:v("sid"),admin_key:v("sak"),enabled:true}));
-</script></body></html>`;
+</script><p class="muted" style="margin-top:28px;font-size:13px;opacity:.65">Non-custodial software, provided as-is. Check every address before you send; crypto sent to a wrong address can\'t be recovered. <a href="/terms">Terms of Service</a></p></body></html>`;
 }
 
 function payPage(origin, q) {
@@ -2604,7 +2680,7 @@ if (!C.to) {
     poll();
   };
 }
-</script></body></html>`;
+</script><p class="muted" style="margin-top:28px;font-size:13px;opacity:.65">Non-custodial software, provided as-is. Check every address before you send; crypto sent to a wrong address can\'t be recovered. <a href="/terms">Terms of Service</a></p></body></html>`;
 }
 
 // ------------------------------------------------------------------ entry
@@ -2650,6 +2726,7 @@ export default {
       }
       if (path === "/.well-known/agent.json" || path === "/.well-known/agent-card.json") { track(c, "view:agent_card"); return json(agentCard(origin)); }
       if (path === "/server.json") return json(serverJson(origin));
+      if (path === "/terms") { track(c, "view:terms"); return text(termsPage(origin), "text/html"); }
       if (path === "/sell") { track(c, "view:sell"); return text(sellPage(), "text/html"); }
       if (path === "/limits") { track(c, "view:limits"); return text(limitsPage(), "text/html"); }
       if (path === "/icon.svg" || path === "/favicon.svg" || path === "/favicon.ico") return new Response(ICON_SVG, { headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400", ...cors } });

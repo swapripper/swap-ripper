@@ -224,10 +224,12 @@ Create a policy at [/limits](https://swap-ripper.szydlow45.workers.dev/limits) o
 
 ## Fees, referrals and safety
 
-- **0.20%** fee, built into every quote (0.15% over $10k). Paying in the coin the recipient already wants? It tells you to pay directly, with no fee.
+- **0.20%** fee, built into every quote. Paying in the coin the recipient already wants? It tells you to pay directly, with no fee.
+- **Max $1,000 per payment** while the service is new.
 - **Referrals:** pass `referrer: "yourname.near"` and earn one third of the fee on every payment you route, paid on-chain. Users pay the same price.
 - **Non-custodial:** one-time deposit addresses, automatic refunds, address checks before any deposit address is issued.
 - Not available to sanctioned persons or in sanctioned jurisdictions. Provided as-is. Always double-check addresses.
+- By using Swap Ripper you agree to the [Terms of Service](https://swap-ripper.szydlow45.workers.dev/terms).
 
 ## Self-host
 
