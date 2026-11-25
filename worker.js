@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "1.6.0";
+const VERSION = "1.6.1";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -252,6 +252,11 @@ function cleanReferrer(c, r) {
 }
 // Volume discounts: bigger swaps pay less.
 const TIERS = [[10000, 15], [1000, 25]]; // [min USD, max bps]
+function discountText(c) {
+  const parts = [`${(c.feeBps / 100).toFixed(2)}% standard`];
+  for (const [min, cap] of [...TIERS].reverse()) if (cap < c.feeBps) parts.push(`${(cap / 100).toFixed(2)}% over $${min.toLocaleString("en-US")}`);
+  return parts.join(", ");
+}
 function effectiveBps(c, usd) {
   let bps = c.feeBps;
   for (const [min, cap] of TIERS) if ((usd || 0) >= min) { bps = Math.min(bps, cap); break; }
@@ -416,7 +421,7 @@ function feeInfo(c, referrer, usd) {
   const ref = split.length > 1 ? split[1] : null;
   return {
     service_fee_bps: bps,
-    volume_discounts: "0.30% standard, 0.25% for swaps over $1,000, 0.15% over $10,000",
+    volume_discounts: discountText(c),
     referrer: ref ? ref.recipient : null,
     referrer_earns_bps: ref ? ref.fee : 0,
     tip: ref ? undefined : "Pass referrer='<your NEAR account>' on any call to earn 1/3 of the fee on swaps you route. Same price for the user.",
@@ -1098,7 +1103,7 @@ function llmsTxt(origin, c) {
 
 > ${DESCRIPTION}
 
-- Service fee: ${c.feeBps / 100}%, built into quotes, with volume discounts (0.25% over $1k, 0.15% over $10k). No API key. No sign-up. Non-custodial.
+- Service fee: ${discountText(c)}, built into quotes. No API key. No sign-up. Non-custodial.
 - Referral program: pass referrer=<your NEAR account> on any call and earn 1/3 of the fee on swaps you route. Same price for the user.
 
 ## Connect
