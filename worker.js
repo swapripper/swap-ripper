@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "3.2.1";
+const VERSION = "3.2.2";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -2261,7 +2261,7 @@ header.top{display:flex;align-items:center;justify-content:space-between;padding
 .brand img{width:30px;height:30px}
 nav a{margin-left:22px;color:var(--soft);text-decoration:none;font-weight:500}nav a:hover{color:var(--ink)}
 .hero{display:grid;grid-template-columns:1.05fr 1fr;gap:56px;align-items:start;padding:40px 0 72px}
-h1{font:800 clamp(40px,5.6vw,68px)/1.02 "Bricolage Grotesque",sans-serif;letter-spacing:-.025em;margin:0 0 22px;max-width:13.5ch}
+h1{font:800 clamp(40px,5.6vw,68px)/1.02 "Bricolage Grotesque",sans-serif;letter-spacing:-.025em;margin:0 0 22px}
 .lede{font-size:20px;color:var(--soft);max-width:34ch;margin:0 0 30px}
 .connect{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:6px 6px 6px 16px;display:flex;align-items:center;gap:10px;max-width:520px}
 .connect code{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
@@ -2288,7 +2288,7 @@ h1{font:800 clamp(40px,5.6vw,68px)/1.02 "Bricolage Grotesque",sans-serif;letter-
 .result .ok{color:#5EEAD4;font-weight:600;margin-bottom:10px}.result .bad{color:#FCA5A5}
 @media (prefers-reduced-motion:no-preference){.result.show{animation:rise .35s ease-out}@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}}
 section{padding:64px 0;border-top:1px solid var(--line)}
-h2.sec{font:700 clamp(28px,3.4vw,40px)/1.1 "Bricolage Grotesque",sans-serif;letter-spacing:-.015em;margin:0 0 12px;max-width:22ch}
+h2.sec{font:700 clamp(28px,3.4vw,40px)/1.1 "Bricolage Grotesque",sans-serif;letter-spacing:-.015em;margin:0 0 12px;max-width:28ch}
 .sec-lede{color:var(--soft);max-width:60ch;margin:0 0 36px}
 .paths{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border:1px solid var(--line);border-radius:18px;background:var(--paper);overflow:hidden}
 .path{padding:28px;border-right:1px solid var(--line)}.path:last-child{border-right:0}
@@ -2315,7 +2315,7 @@ footer a{color:var(--soft)}
 
 <div class="hero">
 <div>
-<h1>Money for AI agents, in any coin.</h1>
+<h1>Money for AI agents,<br>in any coin.</h1>
 <p class="lede">Your agent can pay for anything and get paid by anyone, across 25+ blockchains. No account, no API key, and we never hold the money.</p>
 <div class="connect"><code id="mcpurl">${origin}/mcp</code><button class="btn go" id="copy" type="button">Copy</button></div>
 <p class="small">Add this MCP address to Claude, Cursor or any agent. Prefer fewer tools? Use <code>/mcp/lite</code>.</p>
@@ -2345,7 +2345,8 @@ footer a{color:var(--soft)}
 <p class="sec-lede">Agents hit paywalls, owe invoices, sell services and need limits their owners trust. Swap Ripper handles each of these, in whatever coin is at hand.</p>
 <div class="paths">
 <div class="path"><h3>Pay anything</h3><p>Give the <code>pay</code> tool any bill and it pays the exact amount with whatever the agent holds.</p>
-<ul><li>x402 invoices, Solana Pay, Ethereum and Bitcoin links, plain text</li><li>Cheapest of two networks, with automatic backup</li><li>Gas top-ups on 13 chains</li></ul></div>
+<ul><li>x402 invoices, Solana Pay, Ethereum and Bitcoin links, plain text</li><li>Cheapest of two networks, with automatic backup</li><li>Gas top-ups on 13 chains</li></ul>
+<a class="btn plain" href="#connect">Connect your agent</a></div>
 <div class="path"><h3>Get paid by agents</h3><p>Sell an API or a service and receive exactly the coin you want, straight to your wallet.</p>
 <ul><li>No-code API paywalls with a public directory</li><li>Invoices that know when they're paid</li><li>Signed receipts and payment notifications</li></ul>
 <a class="btn go" href="/sell">Create a paywall</a></div>
@@ -2410,6 +2411,7 @@ async function read(){
  }catch(e){out.className="result show";out.innerHTML='<div class="bad">Couldn\\'t reach the server. Try again.</div>';}
 }
 document.getElementById("read").onclick=read;
+read();
 </script>
 </body></html>`;
 }
