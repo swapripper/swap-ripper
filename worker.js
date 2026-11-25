@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "3.0.0";
+const VERSION = "3.0.1";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -66,8 +66,9 @@ const INSTRUCTIONS =
 // ------------------------------------------------------------------ helpers
 const cors = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version, X-Access-Key, Accept",
+  "Access-Control-Expose-Headers": "X-Credits-Remaining, X-Payment-Required",
 };
 const json = (obj, status = 200, extra = {}) =>
   new Response(JSON.stringify(obj, null, 2), {
