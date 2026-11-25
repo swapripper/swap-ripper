@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "1.4.0";
+const VERSION = "1.4.1";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -212,7 +212,13 @@ async function oneclick(c, path, body) {
   const r = await fetchRetry(`${API}${path}`, { method: "POST", headers: headers(c), body: JSON.stringify(body) });
   const t = await r.text();
   let j; try { j = JSON.parse(t); } catch { j = { message: t }; }
-  if (!r.ok) throw new UserError(`swap network: ${j.message || j.error || r.status}`);
+  if (!r.ok) {
+    const m = String(j.message || j.error || r.status);
+    const hint = /failed to get quote|no quotes/i.test(m)
+      ? " Tips: make sure recipient and refund_address are real wallet addresses (not contracts/programs) on the right chains, try a slightly larger amount, or retry in a moment."
+      : "";
+    throw new UserError(`swap network: ${m}.${hint}`);
+  }
   return j;
 }
 
