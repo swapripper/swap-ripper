@@ -83,7 +83,7 @@ Owners set a max per payment, max per day, and allowed chains or recipients ([/l
 | **Fast when it matters** | `speed: "fast"` fills in about 1–5 seconds |
 | **Safe to retry** | Pass a `request_id` and a retry never pays twice |
 | **Test without money** | `test: true` gives a fake payment that completes in about 15 seconds |
-| **Never holds funds** | One-time deposit addresses, automatic refunds if a route fails |
+| **Never holds funds** | One-time deposit addresses. If a swap can't complete, the network refunds you |
 
 ## Tools
 
@@ -227,7 +227,7 @@ Create a policy at [/limits](https://swap-ripper.szydlow45.workers.dev/limits) o
 - **0.20%** fee, built into every quote. Paying in the coin the recipient already wants? It tells you to pay directly, with no fee.
 - **Max $1,000 per payment** while the service is new.
 - **Referrals:** pass `referrer: "yourname.near"` and earn one third of the fee on every payment you route, paid on-chain. Users pay the same price.
-- **Non-custodial:** one-time deposit addresses, automatic refunds, address checks before any deposit address is issued.
+- **Non-custodial:** one-time deposit addresses and address checks before any deposit address is issued. If a swap can't complete, the solver network refunds automatically. Funds sent to a wrong address can't be recovered.
 - Not available to sanctioned persons or in sanctioned jurisdictions. Provided as-is. Always double-check addresses.
 - By using Swap Ripper you agree to the [Terms of Service](https://swap-ripper.szydlow45.workers.dev/terms).
 
