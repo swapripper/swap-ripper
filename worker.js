@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "1.7.0";
+const VERSION = "1.7.1";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -79,7 +79,7 @@ function cfg(env) {
     feeTo: String(env.FEE_RECIPIENT || "").trim().toLowerCase(),
     feeBps: Number.parseInt(env.FEE_BPS || "30", 10),
     kv: env.STATS || null, // optional Workers KV binding for referral stats
-    relayKey: env.RELAY_API_KEY || "",
+    relayKey: String(env.RELAY_API_KEY || "").trim(),
     relayFeeTo: String(env.RELAY_FEE_TO || "").trim().toLowerCase(),
     origin: "",
   };
