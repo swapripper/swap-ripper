@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "1.5.0";
+const VERSION = "1.5.1";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -516,7 +516,8 @@ async function fundX402(c, a) {
   const minUsd = Math.min(Math.max(Number(a.top_up_usd) || 5, 1), 500);
   const need = Number(pick.amount_human);
   let target = need;
-  if (price && need * price < minUsd) target = minUsd / price;
+  const stable = price && Math.abs(price - 1) < 0.03; // USDC/USDT: $5 means 5 tokens
+  if (price && need * price < minUsd) target = stable ? minUsd : minUsd / price;
   const target_str = target.toFixed(Math.min(tok.decimals, 6)).replace(/0+$/, "").replace(/\.$/, "");
   const invoice = {
     pays_for: pick.description || pick.resource || null,

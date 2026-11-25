@@ -1,4 +1,4 @@
-# ⚡ Swap Ripper: cross-chain swaps, payments and gas for AI agents
+# ⚡ Swap Ripper: cross-chain swaps, x402 funding, payments and gas for AI agents
 
 **One MCP tool call to swap any token across 25+ blockchains.** Bitcoin, Ethereum, Solana, Base, Arbitrum, BNB, Tron, NEAR, Zcash, TON, Sui, XRP, Doge and more.
 
@@ -7,6 +7,23 @@ No API key. No sign-up. No wallet connection. Non-custodial, with automatic refu
 ```
 https://swap-ripper.szydlow45.workers.dev/mcp
 ```
+
+## New: got an HTTP 402? Pay it from any chain
+
+x402 paywalls usually ask for USDC on Base, but your agent's money is on Solana, Ethereum or Bitcoin. Pass the 402 response to **`fund_x402`**. It accepts x402 v1 or v2, either the JSON body or the base64 `PAYMENT-REQUIRED` header. Swap Ripper then:
+
+1. decodes the invoice and picks a network/token it can fund (testnets are flagged),
+2. tops up **your own wallet** on that chain with an exact amount (default ~$5, which covers hundreds of $0.01 calls), paid from any token on any chain,
+3. leaves your normal x402 client to sign and pay the invoice, so no custody and no trust in us for the payment itself.
+
+```json
+POST /api/x402
+{ "payment_required": { "x402Version": 2, "accepts": [ ... ] },
+  "pay_with_token": "USDC", "pay_with_chain": "solana",
+  "wallet": "0xYourBaseWallet", "refund_address": "YourSolanaAddress" }
+```
+
+Call it with only `payment_required` to decode the invoice and get a cost estimate first.
 
 ## Connect
 
@@ -26,6 +43,7 @@ claude mcp add --transport http swap-ripper https://swap-ripper.szydlow45.worker
 
 | Tool | What it does |
 |---|---|
+| `fund_x402` | **Hit a 402 paywall?** Decode the x402 invoice and fund your wallet on the right chain from any chain. |
 | `get_quote` | Live cross-chain price, no addresses needed. Includes a **fair-price check** vs market rates. |
 | `quote_from_text` | Plain English: `"25 USDC on solana to ETH on base"` |
 | `create_swap` | Lock a quote and get a one-time deposit address. Output lands at the recipient automatically. |
