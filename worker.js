@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -46,6 +46,7 @@ const DESCRIPTION =
   "from any chain, pay exact amounts, gas refuel, and 'pay me in any crypto' links.";
 
 const INSTRUCTIONS =
+  "Owners can cap an agent's spending with create_spending_policy (policy-locked URL, daily limits, kill switch). " +
   "Selling something? create_payment_link gives you an invoice; check_payment tells you when it's paid; get_receipt gives signed proof. " +
   "Need to pay something? Pass ANY payment request (link, URI, 402 invoice, or plain text) to the pay tool. " +
   "Got an HTTP 402 / x402 'Payment Required' but your funds are on another chain? Pass the 402 response to fund_x402. " +
@@ -542,6 +543,7 @@ function depositReply(c, a, src, dst, qq, recipient, refund) {
 // Smart routing: quote NEAR Intents and Relay at once, use whichever is cheaper for the agent;
 // if one network fails, the other takes over. speed='fast' forces Relay.
 async function routeSwap(c, a, src, dst, units, recipient, refund, usd, exactOutput) {
+  const pol = await enforcePolicy(c, a, src, dst, recipient, Number(usd) || 0);
   const slip = clampSlip(a.slippage_bps);
   const bps = effectiveBps(c, usd);
   const speed = String(a.speed || "").toLowerCase();
@@ -561,6 +563,7 @@ async function routeSwap(c, a, src, dst, units, recipient, refund, usd, exactOut
       out = depositReply(c, a, src, dst, q, recipient, refund); out.route = "best_price";
     }
     if (choice) out.route_choice = choice;
+    await recordPolicySpend(c, pol, Number(usd) || 0, out);
     await rememberDeposit(c, out, { exactOutput, exactText: exactOutput ? `${fmtUnits(units, dst.decimals)} ${dst.symbol} on ${dst.blockchain}` : null, invoice: a.invoice || null });
     if (a.invoice) out.invoice_id = a.invoice;
     out.receipt_hint = "After it completes, get_receipt with this deposit_address returns a signed, verifiable receipt.";
@@ -632,7 +635,7 @@ async function refuelGas(c, a) {
   const amt = (usd / Number(native.price)).toFixed(Math.min(native.decimals, 8)).replace(/0+$/, "").replace(/\.$/, "");
   const out = await payExact(c, { token: sym, chain, amount_out: amt, pay_with_token: a.pay_with_token,
     pay_with_chain: a.pay_with_chain, recipient: a.recipient, refund_address: a.refund_address,
-    slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed });
+    slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed, policy_id: a.policy_id });
   out.gas = { chain, token: sym, amount: amt, approx_usd: usd };
   return out;
 }
@@ -733,7 +736,7 @@ async function fundX402(c, a) {
   }
   const out = await payExact(c, { token: tok.assetId, amount_out: target_str, pay_with_token: a.pay_with_token,
     pay_with_chain: a.pay_with_chain, recipient: a.wallet, refund_address: a.refund_address,
-    slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed });
+    slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed, policy_id: a.policy_id });
   track(c, "x402_funds");
   out.invoice = invoice;
   out.why = why;
@@ -858,13 +861,117 @@ async function payAnything(c, a) {
   }
   const src = await resolveToken(c, a.pay_with_token, a.pay_with_chain);
   if (src.assetId === dst.assetId) {
+    if (a.policy_id) await enforcePolicy(c, a, src, dst, to, Number(amount) * Number(dst.price || 0));
     return { understood, no_swap_needed: true, message: `You already hold ${dst.symbol} on ${dst.blockchain}. Send ${amount} ${dst.symbol} to ${to} directly: no swap, no fee.` };
   }
   const out = await payExact(c, { token: dst.assetId, amount_out: amount, pay_with_token: src.assetId, recipient: to,
-    refund_address: a.refund_address, slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed,
+    refund_address: a.refund_address, slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed, policy_id: a.policy_id,
     invoice: p.invoice && INV_ID.test(p.invoice) ? p.invoice : undefined });
   track(c, "pay_requests");
   return { understood, ...out };
+}
+
+// ---- Owner spending limits: policy-locked connections the agent can't exceed
+const POL_ID = /^pol_[a-z0-9]{14}$/;
+const randId = (prefix, n) => prefix + Array.from(crypto.getRandomValues(new Uint8Array(n)), (x) => "abcdefghijkmnpqrstuvwxyz23456789"[x % 32]).join("");
+async function sha256hex(t) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t));
+  return Array.from(new Uint8Array(d), (x) => x.toString(16).padStart(2, "0")).join("");
+}
+const today = () => new Date().toISOString().slice(0, 10);
+const listArg = (v) => (Array.isArray(v) ? v : typeof v === "string" && v.trim() ? v.split(",") : []).map((x) => String(x).trim()).filter(Boolean);
+async function loadPolicy(c, id) {
+  if (!POL_ID.test(String(id || ""))) throw new UserError("policy_id looks wrong (it starts with 'pol_').");
+  if (!c.kv) throw new UserError("spending limits are unavailable right now");
+  const raw = await c.kv.get(`pol:${id}`);
+  if (!raw) throw new UserError("policy not found");
+  return JSON.parse(raw);
+}
+async function createSpendingPolicy(c, a) {
+  if (!c.kv) throw new UserError("spending limits are unavailable right now");
+  const perPay = Number(a.max_per_payment_usd), perDay = Number(a.max_per_day_usd);
+  if (!(perPay > 0) || !(perDay > 0)) throw new UserError("max_per_payment_usd and max_per_day_usd are required (positive numbers, in USD).");
+  if (perPay > MAX_USD || perDay > MAX_USD * 10) throw new UserError("limits are too high");
+  const chains = listArg(a.allowed_chains).map(normChain);
+  const tokens = listArg(a.allowed_tokens).map((x) => x.toUpperCase());
+  const recipients = listArg(a.allowed_recipients);
+  const days = Math.min(Math.max(Number(a.expires_in_days) || 365, 1), 365);
+  const id = randId("pol_", 14), adminKey = randId("adm_", 24);
+  const pol = { id, label: a.label ? String(a.label).slice(0, 60) : null, max_per_payment_usd: perPay, max_per_day_usd: perDay,
+    allowed_chains: chains, allowed_tokens: tokens, allowed_recipients: recipients, enabled: true,
+    created_at: new Date().toISOString(), expires_at: new Date(Date.now() + days * 864e5).toISOString(), admin_hash: await sha256hex(adminKey) };
+  await c.kv.put(`pol:${id}`, JSON.stringify(pol), { expirationTtl: (days + 30) * 86400 });
+  track(c, "policies_created");
+  return {
+    policy_id: id,
+    agent_mcp_url: `${c.origin}/mcp/p/${id}`,
+    agent_rest_base: `${c.origin}/api/p/${id}/`,
+    admin_key: adminKey,
+    limits: publicPolicy(pol),
+    how_to_use: [
+      "Give your agent ONLY agent_mcp_url (instead of the normal /mcp URL). Every swap and payment through it is checked against these limits first.",
+      "Keep admin_key private: it's the only way to see the spending log and to switch spending off (set_policy_enabled). It is shown once and cannot be recovered.",
+      "Swap Ripper never holds funds: limits work by refusing to create payment instructions that break the rules.",
+    ],
+  };
+}
+function publicPolicy(p) {
+  return { label: p.label, max_per_payment_usd: p.max_per_payment_usd, max_per_day_usd: p.max_per_day_usd,
+    allowed_chains: p.allowed_chains.length ? p.allowed_chains : "any", allowed_tokens: p.allowed_tokens.length ? p.allowed_tokens : "any",
+    allowed_recipients: p.allowed_recipients.length ? p.allowed_recipients : "any", enabled: p.enabled, expires_at: p.expires_at };
+}
+async function enforcePolicy(c, a, src, dst, recipient, usd) {
+  if (!a.policy_id) return null;
+  const p = await loadPolicy(c, a.policy_id);
+  const no = (why) => { throw new UserError(`Blocked by your owner's spending policy: ${why}`); };
+  if (!p.enabled) no("spending is switched off for this agent.");
+  if (Date.parse(p.expires_at) < Date.now()) no("the policy has expired.");
+  if (!(usd > 0)) no("the USD value of this payment can't be determined, so it can't be checked against your limits.");
+  if (usd > p.max_per_payment_usd) no(`this is ~$${usd.toFixed(2)}, over the $${p.max_per_payment_usd} per-payment limit.`);
+  if (p.allowed_chains.length && (!p.allowed_chains.includes(src.blockchain) || !p.allowed_chains.includes(dst.blockchain)))
+    no(`only these chains are allowed: ${p.allowed_chains.join(", ")}.`);
+  if (p.allowed_tokens.length && !p.allowed_tokens.includes(String(dst.symbol).toUpperCase()))
+    no(`only these tokens can be sent: ${p.allowed_tokens.join(", ")}.`);
+  if (p.allowed_recipients.length) {
+    const r = String(recipient), ok = p.allowed_recipients.some((x) => (/^0x/i.test(x) ? x.toLowerCase() === r.toLowerCase() : x === r));
+    if (!ok) no("this recipient isn't on the approved list.");
+  }
+  const spent = Number((await c.kv.get(`pspend:${p.id}:${today()}`)) || 0);
+  if (spent + usd > p.max_per_day_usd) no(`today's total would be ~$${(spent + usd).toFixed(2)}, over the $${p.max_per_day_usd} daily limit ($${Math.max(p.max_per_day_usd - spent, 0).toFixed(2)} left today).`);
+  return { p, spent };
+}
+async function recordPolicySpend(c, pol, usd, out) {
+  if (!pol) return;
+  try {
+    const key = `pspend:${pol.p.id}:${today()}`;
+    const spent = Number((await c.kv.get(key)) || 0) + usd;
+    await c.kv.put(key, String(+spent.toFixed(2)), { expirationTtl: 3 * 86400 });
+    const lk = `plog:${pol.p.id}`;
+    const log = JSON.parse((await c.kv.get(lk)) || "[]");
+    log.unshift({ at: new Date().toISOString(), usd: +usd.toFixed(2), send: `${out.send_exactly} ${out.send_token && out.send_token.symbol}@${out.deposit_chain}`,
+      receive: out.recipient_receives_exactly || `${out.estimated_amount_out} ${out.receive_token && out.receive_token.symbol}@${out.receive_token && out.receive_token.chain}`,
+      recipient: out.recipient, deposit_address: out.deposit_address, route: out.route });
+    await c.kv.put(lk, JSON.stringify(log.slice(0, 50)), { expirationTtl: 400 * 86400 });
+    out.policy = { policy_id: pol.p.id, spent_today_usd: +spent.toFixed(2), left_today_usd: +Math.max(pol.p.max_per_day_usd - spent, 0).toFixed(2),
+      note: "Counted when payment instructions are issued." };
+  } catch { /* never break payments over bookkeeping */ }
+}
+async function policyStatus(c, a) {
+  const p = await loadPolicy(c, a.policy_id);
+  const spent = Number((await c.kv.get(`pspend:${p.id}:${today()}`)) || 0);
+  const out = { policy_id: p.id, limits: publicPolicy(p), spent_today_usd: spent, left_today_usd: +Math.max(p.max_per_day_usd - spent, 0).toFixed(2) };
+  if (a.admin_key) {
+    if ((await sha256hex(String(a.admin_key))) !== p.admin_hash) throw new UserError("admin_key is wrong");
+    out.log = JSON.parse((await c.kv.get(`plog:${p.id}`)) || "[]");
+  }
+  return out;
+}
+async function setPolicyEnabled(c, a) {
+  const p = await loadPolicy(c, a.policy_id);
+  if (!a.admin_key || (await sha256hex(String(a.admin_key))) !== p.admin_hash) throw new UserError("admin_key is wrong");
+  p.enabled = a.enabled === true || a.enabled === "true";
+  await c.kv.put(`pol:${p.id}`, JSON.stringify(p), { expirationTtl: Math.max(Math.ceil((Date.parse(p.expires_at) - Date.now()) / 1000) + 30 * 86400, 86400) });
+  return { policy_id: p.id, enabled: p.enabled, message: p.enabled ? "Spending is ON for this agent (within its limits)." : "Spending is OFF. Every payment through this policy is refused until you switch it back on." };
 }
 
 // ---- Invoices, payment checks and signed receipts
@@ -1309,6 +1416,43 @@ const TOOLS = [
     run: verifyReceipt,
   },
   {
+    name: "create_spending_policy",
+    title: "Owner: set spending limits for an agent",
+    description: "For agent OWNERS. Create spending limits (max per payment, max per day, optional allowed chains, tokens and recipients) and get a policy-locked connection URL to give your agent. Every swap and payment through that URL is checked first and refused if it breaks a rule. Also returns a private admin_key for the spending log and an off switch. Swap Ripper never holds funds.",
+    inputSchema: { type: "object", required: ["max_per_payment_usd", "max_per_day_usd"], properties: {
+      max_per_payment_usd: { type: "number", description: "Largest single payment allowed, in USD, e.g. 20." },
+      max_per_day_usd: { type: "number", description: "Total allowed per UTC day, in USD, e.g. 100." },
+      allowed_chains: { description: "Optional list of chains money may move on, e.g. ['base','solana']. Empty = any.", anyOf: [{ type: "array", items: { type: "string" } }, { type: "string" }] },
+      allowed_tokens: { description: "Optional list of tokens the agent may send, e.g. ['USDC']. Empty = any.", anyOf: [{ type: "array", items: { type: "string" } }, { type: "string" }] },
+      allowed_recipients: { description: "Optional list of addresses the agent may pay. Empty = any.", anyOf: [{ type: "array", items: { type: "string" } }, { type: "string" }] },
+      label: { type: "string", description: "Optional name, e.g. 'research agent'." },
+      expires_in_days: { type: "integer", description: "1-365, default 365." },
+    } },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    run: createSpendingPolicy,
+  },
+  {
+    name: "policy_status",
+    title: "Check spending limits and today's spend",
+    description: "See a spending policy's limits, how much was spent today and how much is left. Owners who pass admin_key also get the spending log (last 50 payments).",
+    inputSchema: { type: "object", required: ["policy_id"], properties: {
+      policy_id: { type: "string", description: "The policy_id (starts with 'pol_')." },
+      admin_key: { type: "string", description: "Owner only: the admin_key, to include the spending log." },
+    } },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    run: policyStatus,
+  },
+  {
+    name: "set_policy_enabled",
+    title: "Owner: switch an agent's spending on or off",
+    description: "Owner kill switch. enabled=false instantly blocks every swap and payment through the policy; enabled=true turns it back on. Requires admin_key.",
+    inputSchema: { type: "object", required: ["policy_id", "admin_key", "enabled"], properties: {
+      policy_id: { type: "string" }, admin_key: { type: "string" }, enabled: { type: "boolean" },
+    } },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    run: setPolicyEnabled,
+  },
+  {
     name: "refuel_gas",
     title: "Gas station: get gas on any chain",
     description: "Stuck without gas? Get a small amount of the native gas token (ETH on Base/Arbitrum/Optimism/Ethereum, SOL, BNB, POL, AVAX, TRX, TON, SUI...) delivered to any address, paid with whatever token you hold on any chain. Default $3 worth.",
@@ -1404,6 +1548,7 @@ const TOOLS = [
     run: listChains,
   },
 ];
+const POLICY_LOCKED_BLOCK = new Set(["create_spending_policy", "set_policy_enabled"]);
 const TOOL_MAP = Object.fromEntries(TOOLS.map((t) => [t.name, t]));
 const publicTools = () => TOOLS.map(({ run, ...t }) => t);
 
@@ -1435,7 +1580,12 @@ async function handleRpc(msg, c) {
       if (!tool) return err(-32602, `Unknown tool: ${params.name}`);
       track(c, `tool:${tool.name}`);
       try {
-        const out = await tool.run(c, params.arguments || {});
+        const args = { ...(params.arguments || {}) };
+        if (c.policyId) {
+          args.policy_id = c.policyId;
+          if (POLICY_LOCKED_BLOCK.has(tool.name)) throw new UserError("This connection is locked to a spending policy; that tool isn't available here.");
+        }
+        const out = await tool.run(c, args);
         return ok({ content: [{ type: "text", text: JSON.stringify(out, null, 2) }], structuredContent: out, isError: false });
       } catch (e) {
         const message = e instanceof UserError ? e.message : `Temporary error: ${e.message}. Try again shortly.`;
@@ -1473,11 +1623,15 @@ async function handleRest(request, url, c) {
   if (request.method === "POST") {
     try { args = { ...args, ...(await request.json()) }; } catch { /* empty body ok */ }
   }
-  const map = { tokens: "search_tokens", chains: "list_chains", quote: "get_quote", swap: "create_swap", pay: "pay_exact", status: "get_swap_status", prices: "get_prices", compare: "compare_quotes", text: "quote_from_text", referrals: "referral_stats", link: "create_payment_link", invoice: "check_payment", receipt: "get_receipt", verify: "verify_receipt", gas: "refuel_gas", x402: "fund_x402", payany: "pay" };
+  const map = { tokens: "search_tokens", chains: "list_chains", quote: "get_quote", swap: "create_swap", pay: "pay_exact", status: "get_swap_status", prices: "get_prices", compare: "compare_quotes", text: "quote_from_text", referrals: "referral_stats", link: "create_payment_link", invoice: "check_payment", receipt: "get_receipt", verify: "verify_receipt", limits: "create_spending_policy", policy: "policy_status", policy_enabled: "set_policy_enabled", gas: "refuel_gas", x402: "fund_x402", payany: "pay" };
   const tool = TOOL_MAP[map[route]];
   if (tool) track(c, `rest:${route}`);
   if (!tool) return json({ error: "Unknown endpoint", endpoints: Object.keys(map).map((k) => `/api/${k}`) }, 404);
-  if (["swap", "pay", "compare", "gas", "x402", "payany", "verify"].includes(route) && request.method !== "POST") return json({ error: `Use POST for /api/${route}` }, 405);
+  if (["swap", "pay", "compare", "gas", "x402", "payany", "verify", "limits", "policy_enabled"].includes(route) && request.method !== "POST") return json({ error: `Use POST for /api/${route}` }, 405);
+  if (c.policyId) {
+    if (POLICY_LOCKED_BLOCK.has(tool.name)) return json({ error: "This connection is locked to a spending policy; that endpoint isn't available here." }, 403);
+    args.policy_id = c.policyId;
+  }
   try { return json(await tool.run(c, args)); }
   catch (e) { return json({ error: e.message }, e instanceof UserError ? 400 : 502); }
 }
@@ -1596,6 +1750,7 @@ table{border-collapse:collapse;width:100%}td{padding:6px 8px;border-top:1px soli
 <h2>Connect in 10 seconds</h2><pre>${origin}/mcp</pre>
 <pre>{ "mcpServers": { "swap-ripper": { "url": "${origin}/mcp" } } }</pre>
 <h2>What agents can do</h2><table>${TOOLS.map((t) => `<tr><td><code>${t.name}</code></td><td>${t.description}</td></tr>`).join("")}</table>
+<h2>Spending limits owners can trust</h2><p>Owners set limits (per payment, per day, chains, tokens, recipients) and give their agent a policy-locked URL. Anything over the limits is refused before payment instructions exist, with a spending log and an instant off switch. <a href="/limits"><b>Set limits for your agent →</b></a></p>
 <h2>Get paid, with proof</h2><p>Payment links are trackable invoices: <code>check_payment</code> tells a selling agent when it has been paid, and <code>get_receipt</code> issues a signed receipt that anyone can verify with <code>verify_receipt</code>. Deliver only after you are paid.</p>
 <h2>Pay anything</h2><p>Hand the <code>pay</code> tool any bill: an x402 invoice, a Solana Pay or Ethereum payment link, a Bitcoin link, a payment link, or just "send 20 USDC to 0x… on Base". It works out who gets what and pays it exactly with whatever you hold, on any chain.</p>
 <h2>Best price or fastest: your choice</h2><p>By default every swap and payment is quoted on two networks at once and sent through whichever is cheaper for you, with automatic failover if one is down. Need it now? Pass <code>speed: "fast"</code> for fills in seconds.</p>
@@ -1620,6 +1775,49 @@ const PAY_WITH = [
   ["ETH", "eth"], ["ETH", "base"], ["ETH", "arb"], ["SOL", "sol"], ["BTC", "btc"], ["BNB", "bsc"],
   ["NEAR", "near"], ["ZEC", "zec"], ["DOGE", "doge"], ["XRP", "xrp"], ["TRX", "tron"], ["TON", "ton"], ["SUI", "sui"],
 ];
+
+function limitsPage() {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Set spending limits for your AI agent · Swap Ripper</title><link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="description" content="Cap what your AI agent can spend in crypto: per payment, per day, chains, tokens, recipients. Instant off switch. Non-custodial.">
+<style>:root{color-scheme:light dark;--b:rgba(127,127,127,.35)}*{box-sizing:border-box}body{font:16px/1.5 system-ui,sans-serif;max-width:560px;margin:32px auto;padding:0 16px}
+.card{border:1px solid var(--b);border-radius:14px;padding:20px;margin:14px 0}h1{font-size:24px;margin:0 0 4px}h2{font-size:18px;margin:0 0 8px}.sub{opacity:.7;margin:0 0 10px;font-size:14px}
+label{display:block;font-size:13px;opacity:.8;margin:12px 0 4px}input,button{font:inherit;width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--b);background:transparent;color:inherit}
+button{background:#5b5bf0;color:#fff;border:none;margin-top:16px;cursor:pointer;font-weight:600}button.sec{background:transparent;color:inherit;border:1px solid var(--b)}
+.mono{font-family:ui-monospace,monospace;word-break:break-all;font-size:13px;background:rgba(127,127,127,.12);padding:10px;border-radius:8px}.row{display:flex;gap:8px}.row>*{flex:1}
+.warn{background:rgba(255,170,0,.15);border-radius:8px;padding:10px;font-size:14px}.err{color:#d33}.ok{color:#1a9b4b;font-weight:600}.muted{opacity:.65;font-size:13px}table{width:100%;font-size:13px;border-collapse:collapse}td{border-top:1px solid var(--b);padding:4px}</style></head><body>
+<h1>🛡️ Spending limits for your AI agent</h1><p class="sub">Your agent gets a special connection URL. Any swap or payment that breaks your rules is refused before payment instructions are even created. Swap Ripper never holds your money.</p>
+<div class="card"><h2>1. Set the limits</h2>
+<div class="row"><div><label>Max per payment (USD)</label><input id="pp" type="number" min="1" value="20"></div><div><label>Max per day (USD)</label><input id="pd" type="number" min="1" value="100"></div></div>
+<label>Allowed chains (optional, comma separated)</label><input id="ch" placeholder="e.g. base, solana">
+<label>Allowed tokens to send (optional)</label><input id="tk" placeholder="e.g. USDC">
+<label>Allowed recipients (optional addresses, comma separated)</label><input id="rc" placeholder="leave empty to allow any">
+<label>Name (optional)</label><input id="lb" placeholder="e.g. research agent">
+<button id="mk">Create limits</button><div id="out"></div></div>
+<div class="card"><h2>2. Check spending or switch it off</h2>
+<label>Policy ID</label><input id="sid" placeholder="pol_..."><label>Admin key</label><input id="sak" placeholder="adm_..." type="password">
+<div class="row"><button class="sec" id="st">Show spending</button><button class="sec" id="off">Switch OFF</button><button class="sec" id="on">Switch ON</button></div><div id="sout"></div></div>
+<p class="muted"><a href="/">Swap Ripper</a> · Limits apply to swaps and payments made through the policy URL. Spending is counted when payment instructions are issued.</p>
+<script>
+const e=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const post=async(p,b)=>(await fetch(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)})).json();
+const v=(id)=>document.getElementById(id).value.trim();
+document.getElementById("mk").onclick=async()=>{const o=document.getElementById("out");o.innerHTML="<p>Creating…</p>";
+ const j=await post("/api/limits",{max_per_payment_usd:Number(v("pp")),max_per_day_usd:Number(v("pd")),allowed_chains:v("ch"),allowed_tokens:v("tk"),allowed_recipients:v("rc"),label:v("lb")});
+ if(j.error){o.innerHTML='<p class="err">'+e(j.error)+'</p>';return;}
+ document.getElementById("sid").value=j.policy_id;
+ o.innerHTML='<p class="ok">Done.</p><label>Give your agent this MCP URL (instead of the normal one)</label><div class="mono">'+e(j.agent_mcp_url)+'</div>'+
+ '<label>Policy ID</label><div class="mono">'+e(j.policy_id)+'</div><label>Admin key: save it now, it is shown only once</label><div class="mono">'+e(j.admin_key)+'</div>'+
+ '<p class="warn">Keep the admin key private. It is the only way to see the log and switch spending off.</p>';};
+const show=(j)=>{const o=document.getElementById("sout");if(j.error){o.innerHTML='<p class="err">'+e(j.error)+'</p>';return;}
+ let h='<p>'+(j.limits?('Spent today: <b>$'+e(j.spent_today_usd)+'</b> · left: <b>$'+e(j.left_today_usd)+'</b> · '+(j.limits.enabled?'<span class="ok">ON</span>':'<span class="err">OFF</span>')):e(j.message))+'</p>';
+ if(j.log&&j.log.length)h+='<table>'+j.log.map(x=>'<tr><td>'+e(x.at.slice(0,16).replace("T"," "))+'</td><td>$'+e(x.usd)+'</td><td>'+e(x.receive)+'</td></tr>').join("")+'</table>';
+ else if(j.log)h+='<p class="muted">No payments yet.</p>';o.innerHTML=h;};
+document.getElementById("st").onclick=async()=>show(await (await fetch("/api/policy?"+new URLSearchParams({policy_id:v("sid"),admin_key:v("sak")}))).json());
+document.getElementById("off").onclick=async()=>show(await post("/api/policy_enabled",{policy_id:v("sid"),admin_key:v("sak"),enabled:false}));
+document.getElementById("on").onclick=async()=>show(await post("/api/policy_enabled",{policy_id:v("sid"),admin_key:v("sak"),enabled:true}));
+</script></body></html>`;
+}
 
 function payPage(origin, q) {
   const cfgJson = JSON.stringify({ to: q.get("to") || "", token: q.get("token") || "", chain: q.get("chain") || "",
@@ -1728,6 +1926,14 @@ export default {
 
     const path = url.pathname.replace(/\/+$/, "") || "/";
     try {
+      const pm = path.match(/^\/(mcp|api)\/p\/(pol_[a-z0-9]{14})(\/.*)?$/);
+      if (pm) {
+        try { await loadPolicy(c, pm[2]); } catch (e) { return json({ error: e.message }, 404); }
+        c.policyId = pm[2];
+        if (pm[1] === "mcp") return await handleMcp(request, c);
+        const u2 = new URL(url); u2.pathname = "/api" + (pm[3] || "/");
+        return await handleRest(request, u2, c);
+      }
       if (path === "/mcp" || (path === "/" && request.method === "POST")) return await handleMcp(request, c);
       if (path.startsWith("/api")) return await handleRest(request, url, c);
       if (path === "/openapi.json") { track(c, "view:openapi"); return json(openapi(origin)); }
@@ -1738,6 +1944,7 @@ export default {
       }
       if (path === "/.well-known/agent.json" || path === "/.well-known/agent-card.json") { track(c, "view:agent_card"); return json(agentCard(origin)); }
       if (path === "/server.json") return json(serverJson(origin));
+      if (path === "/limits") { track(c, "view:limits"); return text(limitsPage(), "text/html"); }
       if (path === "/icon.svg" || path === "/favicon.svg" || path === "/favicon.ico") return new Response(ICON_SVG, { headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400", ...cors } });
       if (path === "/health") return json({ ok: true, version: VERSION, fee_bps: c.feeBps, fee_recipient_set: !!c.feeTo, api_key_set: !!c.jwt });
       if (path === "/") { track(c, "view:home"); return text(landing(origin, c), "text/html"); }
