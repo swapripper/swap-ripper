@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "3.2.0";
+const VERSION = "3.2.1";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -2261,7 +2261,7 @@ header.top{display:flex;align-items:center;justify-content:space-between;padding
 .brand img{width:30px;height:30px}
 nav a{margin-left:22px;color:var(--soft);text-decoration:none;font-weight:500}nav a:hover{color:var(--ink)}
 .hero{display:grid;grid-template-columns:1.05fr 1fr;gap:56px;align-items:start;padding:40px 0 72px}
-h1{font:800 clamp(40px,5.6vw,68px)/1.02 "Bricolage Grotesque",sans-serif;letter-spacing:-.025em;margin:0 0 22px;max-width:12ch}
+h1{font:800 clamp(40px,5.6vw,68px)/1.02 "Bricolage Grotesque",sans-serif;letter-spacing:-.025em;margin:0 0 22px;max-width:13.5ch}
 .lede{font-size:20px;color:var(--soft);max-width:34ch;margin:0 0 30px}
 .connect{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:6px 6px 6px 16px;display:flex;align-items:center;gap:10px;max-width:520px}
 .connect code{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
@@ -2276,7 +2276,7 @@ h1{font:800 clamp(40px,5.6vw,68px)/1.02 "Bricolage Grotesque",sans-serif;letter-
 .demo::before{content:"";position:absolute;inset:0 0 auto 0;height:5px;background:linear-gradient(90deg,var(--violet),#06B6D4)}
 .demo h2{font:700 26px "Bricolage Grotesque",sans-serif;margin:4px 0 6px;color:#fff;letter-spacing:-.01em}
 .demo p{margin:0 0 16px;color:#A9B4CF;font-size:15px}
-.demo textarea{width:100%;min-height:92px;resize:vertical;background:#0E1830;color:#fff;border:1px solid #2A3A63;border-radius:12px;padding:14px;font:14px/1.5 "JetBrains Mono",monospace}
+.demo textarea{width:100%;min-height:118px;resize:vertical;background:#0E1830;color:#fff;border:1px solid #2A3A63;border-radius:12px;padding:14px;font:14px/1.5 "JetBrains Mono",monospace}
 .demo textarea:focus-visible{outline:3px solid #06B6D4}
 .chips{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 16px}
 .chip{background:transparent;color:#C9D2E8;border:1px solid #33456F;border-radius:999px;padding:6px 12px;font:500 13px "Instrument Sans",sans-serif;cursor:pointer}
@@ -2392,6 +2392,8 @@ document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setTab(t.dataset.k));
 document.getElementById("copy").onclick=async(e)=>{try{await navigator.clipboard.writeText(document.getElementById("mcpurl").textContent);e.target.textContent="Copied";setTimeout(()=>e.target.textContent="Copy",1500);}catch{}};
 const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const bill=document.getElementById("bill"), out=document.getElementById("result");
+const CH={sol:"Solana",base:"Base",eth:"Ethereum",btc:"Bitcoin",arb:"Arbitrum",op:"Optimism",pol:"Polygon",bsc:"BNB Chain",avax:"Avalanche",gnosis:"Gnosis",bera:"Berachain",near:"NEAR",tron:"Tron"};
+const chn=(c)=>CH[c]||c;
 document.querySelectorAll(".chip").forEach(b=>b.onclick=()=>{bill.value=b.dataset.v;read();});
 async function read(){
  out.className="result";out.innerHTML='<span style="color:#8F9BBA">Reading…</span>';
@@ -2401,9 +2403,9 @@ async function read(){
   out.className="result show";
   if(j.error){out.innerHTML='<div class="bad">'+esc(j.error)+'</div>';return;}
   let rows=[];
-  if(j.invoice){const i=j.invoice;rows=[["Kind","x402 invoice"],["Pays for",i.pays_for||"an API call"],["Needs",i.required_per_call+" "+i.token.symbol+" on "+i.chain],["Top-up",i.top_up_amount+" "+i.token.symbol+" ("+(i.covers_about||"")+")"]];}
+  if(j.invoice){const i=j.invoice;rows=[["Kind","x402 invoice"],["Pays for",i.pays_for||"an API call"],["Needs",i.required_per_call+" "+i.token.symbol+" on "+chn(i.chain)],["Top-up",i.top_up_amount+" "+i.token.symbol+" ("+(i.covers_about||"")+")"]];}
   else{const u=j.understood||{};const kinds={text:"Plain English",solana_pay:"Solana Pay link",eip681:"Ethereum payment link",bip21:"Bitcoin link",payment_link:"Payment link",json:"JSON"};
-   rows=[["Kind",kinds[u.kind]||u.kind],["Pay to",u.pay_to],["Amount",(u.amount||"not set")+" "+(u.token||"")],["Chain",u.chain]];if(u.label)rows.push(["Note",u.label]);}
+   rows=[["Kind",kinds[u.kind]||u.kind],["Pay to",u.pay_to],["Amount",(u.amount||"not set")+" "+(u.token||"")],["Chain",chn(u.chain)]];if(u.label)rows.push(["Note",u.label]);}
   out.innerHTML='<div class="ok">Understood. Ready to pay with any coin.</div><dl>'+rows.map(r=>'<dt>'+esc(r[0])+'</dt><dd>'+esc(r[1])+'</dd>').join("")+'</dl>';
  }catch(e){out.className="result show";out.innerHTML='<div class="bad">Couldn\\'t reach the server. Try again.</div>';}
 }
