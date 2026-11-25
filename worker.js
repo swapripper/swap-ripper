@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "1.8.0";
+const VERSION = "1.9.0";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -537,27 +537,60 @@ function depositReply(c, a, src, dst, qq, recipient, refund) {
   };
 }
 
+// Smart routing: quote NEAR Intents and Relay at once, use whichever is cheaper for the agent;
+// if one network fails, the other takes over. speed='fast' forces Relay.
+async function routeSwap(c, a, src, dst, units, recipient, refund, usd, exactOutput) {
+  const slip = clampSlip(a.slippage_bps);
+  const bps = effectiveBps(c, usd);
+  const speed = String(a.speed || "").toLowerCase();
+  const nearP = () => oneclick(c, "/v0/quote",
+    quoteBody(c, src, dst, units, recipient, refund, false, slip, false, { referrer: a.referrer, exactOutput, bps }))
+    .then((q) => { const qq = q.quote || {}; if (!qq.depositAddress) throw new UserError("the swap network did not return a deposit address; try again");
+      qq.amountInFormatted ??= exactOutput ? null : fmtUnits(units, src.decimals); qq.amountIn ??= exactOutput ? null : units;
+      if (exactOutput && !qq.amountInFormatted) throw new UserError("the swap network did not return payment instructions; try again"); return qq; });
+  const fastP = () => fastSwap(c, a, src, dst, units, recipient, refund, exactOutput, bps);
+  const finish = async (kind, q, choice) => {
+    if (kind === "fast") {
+      await recordSwap(c, null, Number(q.amountInUsd) || usd); track(c, "fast_swaps");
+      const out = fastReply(c, a, src, dst, q, recipient, refund); if (choice) out.route_choice = choice; return out;
+    }
+    await recordSwap(c, a.referrer, Number(q.amountInUsd) || usd);
+    const out = depositReply(c, a, src, dst, q, recipient, refund); out.route = "best_price"; if (choice) out.route_choice = choice; return out;
+  };
+  if (speed === "fast") return finish("fast", await fastP());
+  const canFast = fastEnabled(c) && relayCurrency(src) && relayCurrency(dst);
+  if (!canFast) return finish("near", await nearP());
+  // With a referrer, prefer NEAR (referral share is paid there); Relay is only a fallback.
+  if (a.referrer) {
+    try { return await finish("near", await nearP()); }
+    catch (e) { const f = await fastP().catch(() => null); if (f) return finish("fast", f, { chosen: "fast", reason: "primary network couldn't quote this; used the backup network" }); throw e; }
+  }
+  const [n, f] = await Promise.allSettled([nearP(), fastP()]);
+  if (n.status === "rejected" && f.status === "rejected") throw n.reason;
+  if (n.status === "rejected") return finish("fast", f.value, { chosen: "fast", reason: "primary network couldn't quote this; used the backup network" });
+  if (f.status === "rejected") return finish("near", n.value);
+  const nv = n.value, fv = f.value;
+  let fastWins, cmp;
+  if (exactOutput) {
+    const a1 = Number(nv.amountInFormatted), a2 = Number(fv.amountInFormatted);
+    fastWins = a2 < a1; cmp = { you_pay_best_price_route: a1, you_pay_fast_route: a2, token: src.symbol };
+  } else {
+    const o1 = Number(nv.amountOutFormatted), o2 = Number(fv.amountOutFormatted);
+    fastWins = o2 > o1; cmp = { you_get_best_price_route: o1, you_get_fast_route: o2, token: dst.symbol };
+  }
+  const choice = { chosen: fastWins ? "fast" : "best_price", compared: cmp,
+    reason: fastWins ? "the fast route was cheaper for this swap, so you get speed and price" : "the best-price route gives you more" };
+  return fastWins ? finish("fast", fv, choice) : finish("near", nv, choice);
+}
+
 async function createSwap(c, a) {
   const src = await resolveToken(c, a.from_token, a.from_chain);
   const dst = await resolveToken(c, a.to_token, a.to_chain);
   const units = toUnits(a.amount, src.decimals);
   const usd = usdCheck(src, a.amount);
-  const slip = clampSlip(a.slippage_bps);
   const recipient = checkAddress(a.recipient, dst.blockchain, "recipient");
   const refund = checkAddress(a.refund_address, src.blockchain, "refund_address");
-  if (String(a.speed || "").toLowerCase() === "fast") {
-    const f = await fastSwap(c, a, src, dst, units, recipient, refund, false, effectiveBps(c, usd));
-    await recordSwap(c, null, Number(f.amountInUsd) || usd); track(c, "fast_swaps");
-    return fastReply(c, a, src, dst, f, recipient, refund);
-  }
-  const q = await oneclick(c, "/v0/quote",
-    quoteBody(c, src, dst, units, recipient, refund, false, slip, false, { referrer: a.referrer, bps: effectiveBps(c, usd) }));
-  const qq = q.quote || {};
-  if (!qq.depositAddress) throw new UserError("the swap network did not return a deposit address; try again");
-  qq.amountInFormatted ??= String(a.amount);
-  qq.amountIn ??= units;
-  await recordSwap(c, a.referrer, Number(qq.amountInUsd) || usd);
-  return depositReply(c, a, src, dst, qq, recipient, refund);
+  return routeSwap(c, a, src, dst, units, recipient, refund, usd, false);
 }
 
 // Pay EXACTLY amount_out of a token to someone, funded by any token the agent holds.
@@ -567,22 +600,9 @@ async function payExact(c, a) {
   const units = toUnits(a.amount_out, dst.decimals);
   const usd = Number(a.amount_out) * Number(dst.price || 0);
   if (usd && usd > MAX_USD) throw new UserError(`max per payment is $${MAX_USD}`);
-  const slip = clampSlip(a.slippage_bps);
   const recipient = checkAddress(a.recipient, dst.blockchain, "recipient");
   const refund = checkAddress(a.refund_address, src.blockchain, "refund_address");
-  if (String(a.speed || "").toLowerCase() === "fast") {
-    const f = await fastSwap(c, a, src, dst, units, recipient, refund, true, effectiveBps(c, usd));
-    await recordSwap(c, null, Number(f.amountInUsd) || usd); track(c, "fast_swaps");
-    const out = fastReply(c, a, src, dst, f, recipient, refund);
-    out.recipient_receives_exactly = `${a.amount_out} ${dst.symbol} on ${dst.blockchain}`;
-    return out;
-  }
-  const q = await oneclick(c, "/v0/quote",
-    quoteBody(c, src, dst, units, recipient, refund, false, slip, false, { referrer: a.referrer, exactOutput: true, bps: effectiveBps(c, usd) }));
-  const qq = q.quote || {};
-  if (!qq.depositAddress || !qq.amountInFormatted) throw new UserError("the swap network did not return payment instructions; try again");
-  await recordSwap(c, a.referrer, Number(qq.amountInUsd) || usd);
-  const out = depositReply(c, a, src, dst, qq, recipient, refund);
+  const out = await routeSwap(c, a, src, dst, units, recipient, refund, usd, true);
   out.recipient_receives_exactly = `${a.amount_out} ${dst.symbol} on ${dst.blockchain}`;
   return out;
 }
@@ -976,6 +996,13 @@ async function swapStatus(c, a) {
 
 async function fetchStatus(c, a) {
   if (String(a.route || "").toLowerCase() === "fast") return fetchFastStatus(c, a);
+  if (!a.route && fastEnabled(c)) {
+    try { return await fetchNearStatus(c, a); }
+    catch (e) { try { const f = await fetchFastStatus(c, a); if (f.status !== "PENDING_DEPOSIT") return f; } catch { /* ignore */ } throw e; }
+  }
+  return fetchNearStatus(c, a);
+}
+async function fetchNearStatus(c, a) {
   const p = new URLSearchParams({ depositAddress: a.deposit_address });
   if (a.deposit_memo) p.set("depositMemo", a.deposit_memo);
   const r = await fetchRetry(`${API}/v0/status?${p}`, { headers: headers(c) });
@@ -1027,7 +1054,7 @@ function fmtUnits(units, decimals) {
 
 // ------------------------------------------------------------------ MCP tool definitions
 const REFERRER = { type: "string", description: "Optional: your NEAR account (e.g. 'myagent.near'). You earn 1/3 of the service fee on every swap routed with it. The user pays the same." };
-const SPEED = { type: "string", enum: ["best_price", "fast"], description: "Optional. 'best_price' (default, ~20-60s, usually the most output) or 'fast' (~seconds via Relay, usually slightly less output). get_quote shows both in best_price_check/fast_option." };
+const SPEED = { type: "string", enum: ["best_price", "fast"], description: "Optional. Default 'best_price': Swap Ripper quotes two networks at once and uses whichever is cheaper for you (and the other if one fails); the reply's route_choice shows both. 'fast' forces the ~seconds Relay route." };
 const TOKEN_PROPS = {
   from_token: { type: "string", description: "Token to send: symbol ('USDC', 'ETH', 'BTC'), 'SYMBOL@chain', 'SYMBOL on chain', or an asset_id from search_tokens." },
   from_chain: { type: "string", description: "Chain the token is sent from, e.g. 'solana', 'base', 'ethereum', 'bitcoin'. Needed when the symbol exists on several chains." },
@@ -1422,7 +1449,7 @@ table{border-collapse:collapse;width:100%}td{padding:6px 8px;border-top:1px soli
 <pre>{ "mcpServers": { "swap-ripper": { "url": "${origin}/mcp" } } }</pre>
 <h2>What agents can do</h2><table>${TOOLS.map((t) => `<tr><td><code>${t.name}</code></td><td>${t.description}</td></tr>`).join("")}</table>
 <h2>Pay anything</h2><p>Hand the <code>pay</code> tool any bill: an x402 invoice, a Solana Pay or Ethereum payment link, a Bitcoin link, a payment link, or just "send 20 USDC to 0x… on Base". It works out who gets what and pays it exactly with whatever you hold, on any chain.</p>
-<h2>Best price or fastest: your choice</h2><p>Default route: best price (usually 20-60s). Need it now? Pass <code>speed: "fast"</code> for fills in seconds. Every quote shows both.</p>
+<h2>Best price or fastest: your choice</h2><p>By default every swap and payment is quoted on two networks at once and sent through whichever is cheaper for you, with automatic failover if one is down. Need it now? Pass <code>speed: "fast"</code> for fills in seconds.</p>
 <h2>Proven best price</h2><p>Every quote is checked live against Relay at the same moment, and the result is in the answer (<code>best_price_check</code>). No trust needed: agents see exactly how much more they get, or if going direct would be cheaper.</p>
 <h2>Got HTTP 402? Pay it from any chain</h2><p>x402 paywalls usually want USDC on Base, but your agent's money is on Solana, Ethereum or Bitcoin? Pass the 402 response to <code>fund_x402</code>. It reads the invoice and tops up your wallet on the right chain with an exact amount, paid with whatever you hold. Fund once (~$5) and dozens of future 402 calls need no swap.</p>
 <h2>Get paid in any crypto</h2><p>Make a payment link in seconds: your customer pays with whatever coin they hold, and you receive exactly the token you want. <a href="/pay"><b>Create a payment link →</b></a></p>

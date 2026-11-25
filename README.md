@@ -41,7 +41,7 @@ Call it with only `payment_required` to decode the invoice and get a cost estima
 
 ## Best price or fastest: you choose
 
-- **Default (`best_price`)**: routed through NEAR Intents solvers, usually 20-60s, and usually the most output. Every quote includes a live `best_price_check` against Relay so you can see the proof.
+- **Default (`best_price`)**: every swap and payment is quoted on **two networks at once** (NEAR Intents and Relay) and sent through whichever is cheaper for you. If one network is down or can't do a route, the other takes over automatically. The reply's `route_choice` shows both prices.
 - **`speed: "fast"`**: routed through Relay, fills in about 1-5 seconds, usually slightly less output. Works on `create_swap`, `pay_exact`, `refuel_gas` and `fund_x402`. Track it with `get_swap_status` and `route: "fast"`.
 
 `get_quote` shows both options side by side (`fast_option`).
