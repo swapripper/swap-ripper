@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "3.3.2";
+const VERSION = "3.3.3";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 1000; // per payment, kept low while the service is new
@@ -1507,7 +1507,7 @@ let PENDING = null; // set per request to ctx.waitUntil
 // Money events are counted exactly. High-volume events (agent connections, page views) are sampled 1 in 10,
 // everything else 1 in 4: the free tier allows only 1,000 storage writes a day.
 const TRACK_ALWAYS = /^(swaps_|fast_swaps|paywall|policies_|webhooks_|links_created|pay_requests|x402_funds)/;
-const TRACK_HIGH = /^(mcp_connects|view:|rest:payany$)/;
+const TRACK_HIGH = /^(mcp_connects|view:|rest:payany$|connect:)/;
 function track(c, event) {
   if (!c.kv) return;
   let weight = 1;
@@ -1537,7 +1537,36 @@ async function usageStats(c, days = 14) {
   for (const r of out) for (const [k, v] of Object.entries(r)) if (k !== "day") totals[k] = (totals[k] || 0) + v;
   let all = { swaps: 0, usd: 0 };
   try { all = JSON.parse((await c.kv.get("total")) || '{"swaps":0,"usd":0}'); } catch {}
-  return { enabled: true, window_days: days, totals, by_day: out, all_time_swaps_created: all.swaps, all_time_volume_usd: all.usd };
+  const clients = [];
+  for (let i = 0; i < Math.min(days, 14); i++) {
+    const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+    const v = await c.kv.get(`cl:${d}`);
+    if (v) clients.push({ day: d, first_seen: JSON.parse(v) });
+  }
+  return { enabled: true, window_days: days, totals, by_day: out, clients_by_day: clients, all_time_swaps_created: all.swaps, all_time_volume_usd: all.usd };
+}
+
+// ---- who is connecting: MCP clients announce their app name (clientInfo.name) on connect.
+// Each new name is recorded exactly once per day (so a single real visit shows up); repeat counts are sampled.
+const clientSlug = (v) => (String(v || "unknown").toLowerCase().replace(/[^a-z0-9._ -]/g, "").trim().replace(/\s+/g, "-").slice(0, 40) || "unknown");
+const SEEN_CLIENTS = new Set();
+function noteClient(c, kind, name) {
+  if (!c.kv) return;
+  const day = new Date().toISOString().slice(0, 10), id = `${day}|${kind}|${name}`;
+  track(c, `${kind}:${name}`);
+  if (SEEN_CLIENTS.has(id)) return;
+  SEEN_CLIENTS.add(id); if (SEEN_CLIENTS.size > 2000) SEEN_CLIENTS.clear();
+  const job = (async () => {
+    try {
+      const k = `cl:${day}`;
+      const cur = JSON.parse((await c.kv.get(k)) || "{}");
+      const key = `${kind}:${name}`;
+      if (cur[key] || Object.keys(cur).length >= 300) return; // already recorded today: no write
+      cur[key] = new Date().toISOString().slice(11, 16) + " UTC";
+      await c.kv.put(k, JSON.stringify(cur), { expirationTtl: 60 * 60 * 24 * 400 });
+    } catch { /* never break requests */ }
+  })();
+  if (PENDING) PENDING(job);
 }
 
 // ---- referral stats (optional Workers KV binding named STATS)
@@ -2077,6 +2106,7 @@ async function handleRpc(msg, c) {
   switch (method) {
     case "initialize":
       track(c, "mcp_connects");
+      noteClient(c, "connect", clientSlug(params.clientInfo && params.clientInfo.name));
       return ok({
         protocolVersion: params.protocolVersion || "2025-06-18",
         capabilities: { tools: { listChanged: false } },
@@ -2091,6 +2121,7 @@ async function handleRpc(msg, c) {
       const tool = TOOL_MAP[params.name];
       if (!tool) return err(-32602, `Unknown tool: ${params.name}`);
       track(c, `tool:${tool.name}`);
+      noteClient(c, "tools", clientSlug(String(c.ua || "").split(/[\/ ]/)[0]));
       try {
         if (CREATE_TOOLS.has(tool.name) && !allowCreate(c)) throw new UserError("Too many new records from your address in the last minute. Wait a minute and try again.");
         const args = { ...(params.arguments || {}) };
@@ -2711,6 +2742,7 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
 
     c.ip = request.headers.get("cf-connecting-ip") || "";
+    c.ua = request.headers.get("user-agent") || "";
     const country = request.cf && request.cf.country;
     if (country && BLOCKED_COUNTRIES.has(country) && url.pathname !== "/") {
       return json({ error: "This service is not available in your region." }, 451);
