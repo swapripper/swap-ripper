@@ -8,6 +8,17 @@ No API key. No sign-up. No wallet connection. Non-custodial, with automatic refu
 https://swap-ripper.szydlow45.workers.dev/mcp
 ```
 
+## New: sell your API to AI agents (Agent Paywall)
+
+Put a paywall in front of **any https API** in 60 seconds, with no code. Use the web page at **[/sell](https://swap-ripper.szydlow45.workers.dev/sell)** or the `create_paywall` tool.
+
+1. Set a price per pack (e.g. **1 USDC for 1000 calls**) and your wallet. You get a **gateway URL** like `https://swap-ripper.szydlow45.workers.dev/g/pw_...`.
+2. Agents calling it without access get **HTTP 402** with instructions. They pay with **any coin on any chain**, and the money goes **straight to your wallet**. Our `pay` tool does it in one step: hand it the gateway URL.
+3. They call again with `X-Access-Key: ak_...`. Requests (path, query, body) are forwarded to your API, and credits count down (`X-Credits-Remaining`). If your API errors or is down, the credit isn't used.
+4. Optional: a secret header so only Swap Ripper can reach your API, a public directory listing (`find_paywalls`), stats and an off switch (`paywall_stats`, `set_paywall_enabled`), and test mode.
+
+Buyers: `find_paywalls` → `buy_access` (or `pay` with the gateway URL) → call with `X-Access-Key` → `access_status`.
+
 ## Built for builders
 
 - **Test mode**: add `test: true` to any payment (or create a test invoice) and get a fake deposit address that completes by itself in ~15 seconds. Status, invoices, receipts, webhooks and spending limits all work, with no real money. Test payments can never pay a real invoice.
@@ -127,6 +138,8 @@ curl -s -X POST https://swap-ripper.szydlow45.workers.dev/api/x402 -H 'content-t
 | `check_payment` | Did I get paid? Invoice status with transaction proof. |
 | `get_receipt` / `verify_receipt` | Signed receipts anyone can verify. |
 | `create_spending_policy` / `policy_status` / `set_policy_enabled` | Owner spending limits, log and kill switch. |
+| `create_paywall` / `paywall_stats` / `set_paywall_enabled` | Sell your API to agents in any coin. |
+| `find_paywalls` / `buy_access` / `access_status` | Find and buy access to paid APIs. |
 | `fund_x402` | **Hit a 402 paywall?** Decode the x402 invoice and fund your wallet on the right chain from any chain. |
 | `get_quote` | Live cross-chain price, no addresses needed. Includes a **fair-price check** vs market rates. |
 | `quote_from_text` | Plain English: `"25 USDC on solana to ETH on base"` |

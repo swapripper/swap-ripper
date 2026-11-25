@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "2.3.0";
+const VERSION = "3.0.0";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -46,6 +46,7 @@ const DESCRIPTION =
   "from any chain, pay exact amounts, gas refuel, and 'pay me in any crypto' links.";
 
 const INSTRUCTIONS =
+  "Hit a Swap Ripper paywall (402 from a /g/ URL)? Hand the URL to the pay tool or use buy_access, then send header X-Access-Key. Sell your own API with create_paywall. " +
   "Always pass a unique request_id on payments so retries never pay twice. Add test=true to try any flow without real money. " +
   "Owners can cap an agent's spending with create_spending_policy (policy-locked URL, daily limits, kill switch). " +
   "Selling something? create_payment_link gives you an invoice; check_payment tells you when it's paid; get_receipt gives signed proof. " +
@@ -843,6 +844,8 @@ async function parsePaymentRequest(c, req) {
   if (/^https?:\/\//i.test(r)) {
     let u; try { u = new URL(r); } catch { throw new UserError("That link isn't a valid URL."); }
     const q = u.searchParams;
+    const g = u.pathname.match(/^\/g\/(pw_[a-z0-9]{12})/);
+    if (g) return { kind: "paywall", paywall_id: g[1] };
     if (u.pathname.replace(/\/$/, "").endsWith("/pay") && q.get("to")) {
       return { kind: "payment_link", to: q.get("to"), token: q.get("token"), chain: q.get("chain"), amount: q.get("amount"), label: q.get("label"), invoice: q.get("inv"), test: q.get("test") === "1" };
     }
@@ -894,6 +897,11 @@ async function parsePaymentRequest(c, req) {
 }
 async function payAnything(c, a) {
   const p = await parsePaymentRequest(c, a.request);
+  if (p.kind === "paywall") {
+    const out = await buyAccess(c, { paywall_id: p.paywall_id, access_key: a.access_key, pay_with_token: a.pay_with_token, pay_with_chain: a.pay_with_chain,
+      refund_address: a.refund_address, speed: a.speed, request_id: a.request_id, policy_id: a.policy_id });
+    return { understood: { kind: "paywalled API", paywall_id: p.paywall_id }, ...out };
+  }
   if (p.kind === "x402") {
     const out = await fundX402(c, { ...a, payment_required: p.payment_required });
     return { understood: { kind: "x402 invoice" }, ...out };
@@ -1182,6 +1190,240 @@ async function runWebhookSweep(c) {
   return n;
 }
 
+// ======================================================================
+// Agent Paywall: make any API agent-payable in any coin. Money goes straight to the seller;
+// Swap Ripper only tracks prepaid credits (non-custodial).
+const PW_ID = /^pw_[a-z0-9]{12}$/, AK = /^ak_[a-z0-9]{28}$/;
+const PW_MAX_BODY = 1024 * 1024, PW_TIMEOUT_MS = 25000;
+function checkUpstreamUrl(u) {
+  let x; try { x = new URL(String(u)); } catch { throw new UserError("upstream_url must be a full https:// URL, e.g. https://api.example.com/v1"); }
+  if (x.protocol !== "https:") throw new UserError("upstream_url must use https://");
+  const h = x.hostname.toLowerCase();
+  if (h === "localhost" || h.endsWith(".local") || h.endsWith(".internal") || h.endsWith(".localhost") || /^\d+\.\d+\.\d+\.\d+$/.test(h) || h.includes(":") || h.startsWith("["))
+    throw new UserError("upstream_url must be a public hostname (no IP addresses or localhost)");
+  if (h.endsWith("workers.dev") && h.startsWith("swap-ripper.")) throw new UserError("upstream_url can't point back at Swap Ripper");
+  if (x.username || x.password) throw new UserError("don't put credentials in upstream_url; use upstream_header instead");
+  x.hash = ""; return x.toString().replace(/\/$/, "");
+}
+async function loadPaywall(c, id) {
+  if (!PW_ID.test(String(id || ""))) throw new UserError("paywall id looks wrong (it starts with 'pw_')");
+  if (!c.kv) throw new UserError("paywalls are unavailable right now");
+  const raw = await c.kv.get(`pw:${id}`);
+  if (!raw) throw new UserError("paywall not found");
+  return JSON.parse(raw);
+}
+const gatewayUrl = (c, id) => `${c.origin}/g/${id}`;
+function publicPaywall(c, pw) {
+  return { paywall_id: pw.id, name: pw.name, description: pw.description, gateway_url: gatewayUrl(c, pw.id),
+    price: `${pw.price} ${pw.token} on ${pw.chain}`, calls_per_pack: pw.calls, price_per_call: `${+(Number(pw.price) / pw.calls).toPrecision(4)} ${pw.token}`,
+    pay_with: "any token on any supported chain", enabled: pw.enabled, test: !!pw.test, listed: !!pw.listed };
+}
+async function createPaywall(c, a) {
+  if (!c.kv) throw new UserError("paywalls are unavailable right now");
+  const upstream = checkUpstreamUrl(a.upstream_url);
+  const dst = await resolveToken(c, a.token || "USDC", a.chain || "base");
+  const to = checkAddress(a.recipient, dst.blockchain, "recipient (your wallet)");
+  const price = String(a.price_per_pack ?? a.price ?? "").trim();
+  toUnits(price, dst.decimals);
+  const usd = Number(price) * Number(dst.price || 0);
+  if (!a.test && usd && usd < 1) throw new UserError(`price_per_pack must be worth at least $1 (crypto networks can't move tiny amounts cheaply). Sell more calls per pack instead, e.g. 1 ${dst.symbol} for 1000 calls.`);
+  if (usd > 5000) throw new UserError("price_per_pack is too high (max ~$5,000)");
+  const calls = Math.floor(Number(a.calls_per_pack));
+  if (!(calls >= 1 && calls <= 1000000)) throw new UserError("calls_per_pack must be between 1 and 1,000,000");
+  let header = null;
+  if (a.upstream_header) {
+    const m = String(a.upstream_header).match(/^([A-Za-z0-9-]{1,64}):\s*(.{1,500})$/);
+    if (!m) throw new UserError("upstream_header must look like 'Authorization: Bearer abc123'");
+    header = { name: m[1], value: m[2] };
+  }
+  const id = randId("pw_", 12), adminKey = randId("adm_", 24);
+  const pw = { id, name: String(a.name || "Paid API").slice(0, 60), description: String(a.description || "").slice(0, 300), upstream, header,
+    token: dst.symbol, chain: dst.blockchain, asset: dst.assetId, recipient: to, price, calls, enabled: true, test: !!a.test, listed: !!a.listed && !a.test,
+    created_at: new Date().toISOString(), admin_hash: await sha256hex(adminKey) };
+  await c.kv.put(`pw:${id}`, JSON.stringify(pw));
+  if (pw.listed) await dirUpsert(c, pw);
+  track(c, "paywalls_created");
+  return {
+    ...publicPaywall(c, pw),
+    admin_key: adminKey,
+    how_it_works: [
+      `Share gateway_url (${gatewayUrl(c, id)}). Agents calling it without access get HTTP 402 with buying instructions.`,
+      `Agents buy a pack (${price} ${dst.symbol} for ${calls} calls) with ANY coin on any chain; the money goes straight to your wallet ${to}.`,
+      "Paid calls are forwarded to your upstream_url (path and query are kept) and the response is passed back.",
+      "Keep admin_key private: use it with paywall_stats and set_paywall_enabled. It's shown once.",
+    ],
+    tip: pw.test ? "Test paywall: only test-mode payments count. Create a real one when you're ready." : (pw.listed ? "Listed in the public directory (find_paywalls)." : "Not listed publicly. Pass listed=true to appear in find_paywalls."),
+  };
+}
+async function dirUpsert(c, pw) {
+  try {
+    const d = JSON.parse((await c.kv.get("pwdir")) || "[]").filter((x) => x.id !== pw.id);
+    if (pw.listed && pw.enabled) d.unshift({ id: pw.id, name: pw.name, description: pw.description, price: pw.price, token: pw.token, chain: pw.chain, calls: pw.calls });
+    await c.kv.put("pwdir", JSON.stringify(d.slice(0, 500)));
+  } catch { /* directory is best-effort */ }
+}
+async function findPaywalls(c, a) {
+  if (!c.kv) return { count: 0, paywalls: [] };
+  const q = String(a.query || "").toLowerCase().trim();
+  const d = JSON.parse((await c.kv.get("pwdir")) || "[]");
+  const words = q.split(/\s+/).filter(Boolean);
+  const hits = d.filter((x) => !words.length || words.every((w) => `${x.name} ${x.description}`.toLowerCase().includes(w)));
+  return { count: hits.length, paywalls: hits.slice(0, 25).map((x) => ({ paywall_id: x.id, name: x.name, description: x.description,
+    gateway_url: gatewayUrl(c, x.id), price: `${x.price} ${x.token} on ${x.chain}`, calls_per_pack: x.calls,
+    price_per_call: `${+(Number(x.price) / x.calls).toPrecision(4)} ${x.token}` })),
+    how_to_use: "Call buy_access with a paywall_id (or hand the gateway_url to the pay tool), pay, then call the gateway_url with header X-Access-Key." };
+}
+async function buyAccess(c, a) {
+  const id = a.paywall_id || (String(a.gateway_url || "").match(/\/g\/(pw_[a-z0-9]{12})/) || [])[1];
+  const pw = await loadPaywall(c, id);
+  if (!pw.enabled) throw new UserError("this paywall is switched off by its owner");
+  let key = a.access_key ? String(a.access_key).trim() : null, rec;
+  if (key) {
+    if (!AK.test(key)) throw new UserError("access_key looks wrong");
+    rec = JSON.parse((await c.kv.get(`ak:${key}`)) || "null");
+    if (!rec || rec.paywall !== pw.id) throw new UserError("that access_key isn't for this paywall");
+  } else {
+    key = randId("ak_", 28);
+    rec = { paywall: pw.id, calls_left: 0, pending: [], bought: 0, created_at: new Date().toISOString() };
+  }
+  if ((rec.pending || []).length >= 5) throw new UserError("too many unpaid packs on this key; pay one of them first");
+  const link = await createPaymentLink(c, { token: pw.asset, recipient: pw.recipient, amount: pw.price, label: `${pw.name}: ${pw.calls} calls`, test: pw.test });
+  rec.pending.push({ invoice: link.invoice_id, calls: pw.calls, at: new Date().toISOString() });
+  await c.kv.put(`ak:${key}`, JSON.stringify(rec), { expirationTtl: 400 * 86400 });
+  const out = {
+    access_key: key, paywall: publicPaywall(c, pw), pack: `${pw.calls} calls for ${pw.price} ${pw.token}`,
+    payment_link: link.payment_link, invoice_id: link.invoice_id,
+    next_steps: [
+      "Pay the pack: hand payment_link to the pay tool (with pay_with_token, pay_with_chain, refund_address), or open it in a browser.",
+      `Then call ${gatewayUrl(c, pw.id)}/<path> with header 'X-Access-Key: ${key}'. Credits activate automatically once the payment completes.`,
+      "Check credits any time with access_status.",
+    ],
+  };
+  if (a.pay_with_token) {
+    const paid = await payAnything(c, { request: link.payment_link, pay_with_token: a.pay_with_token, pay_with_chain: a.pay_with_chain,
+      refund_address: a.refund_address, speed: a.speed, request_id: a.request_id, policy_id: a.policy_id, test: pw.test });
+    out.payment = paid;
+  }
+  track(c, "paywall_packs_started");
+  return out;
+}
+async function activateCredits(c, key, rec) {
+  if (!rec.pending || !rec.pending.length) return rec;
+  let changed = false;
+  for (const pend of rec.pending.slice(0, 3)) {
+    try {
+      const st = await checkPayment(c, { invoice_id: pend.invoice });
+      if (st.paid) {
+        rec.calls_left += pend.calls; rec.bought += pend.calls; changed = true;
+        rec.pending = rec.pending.filter((x) => x.invoice !== pend.invoice);
+        const sk = `pwstats:${rec.paywall}`;
+        const stt = JSON.parse((await c.kv.get(sk)) || '{"packs":0,"calls_sold":0,"calls_served":0,"revenue":0}');
+        const pw = JSON.parse((await c.kv.get(`pw:${rec.paywall}`)) || "{}");
+        stt.packs += 1; stt.calls_sold += pend.calls; stt.revenue = +(stt.revenue + Number(pw.price || 0)).toFixed(8); stt.last_sale = new Date().toISOString();
+        await c.kv.put(sk, JSON.stringify(stt));
+        track(c, "paywall_packs_paid");
+      } else if (Date.now() - Date.parse(pend.at) > 2 * 864e5) {
+        rec.pending = rec.pending.filter((x) => x.invoice !== pend.invoice); changed = true; // stale unpaid pack
+      }
+    } catch { /* try again next time */ }
+  }
+  if (changed) await c.kv.put(`ak:${key}`, JSON.stringify(rec), { expirationTtl: 400 * 86400 });
+  return rec;
+}
+async function accessStatus(c, a) {
+  const key = String(a.access_key || "").trim();
+  if (!AK.test(key)) throw new UserError("access_key looks wrong (it starts with 'ak_')");
+  let rec = JSON.parse((await c.kv.get(`ak:${key}`)) || "null");
+  if (!rec) throw new UserError("access_key not found");
+  rec = await activateCredits(c, key, rec);
+  return { access_key: key, paywall_id: rec.paywall, gateway_url: gatewayUrl(c, rec.paywall), calls_left: rec.calls_left,
+    unpaid_packs: (rec.pending || []).map((x) => ({ invoice_id: x.invoice, calls: x.calls })), total_calls_bought: rec.bought,
+    tip: rec.calls_left > 0 ? "Ready: call the gateway_url with header X-Access-Key." : "No credits yet: pay the pack's payment_link (or buy_access again to top up)." };
+}
+async function paywallStats(c, a) {
+  const pw = await loadPaywall(c, a.paywall_id);
+  if (!a.admin_key || (await sha256hex(String(a.admin_key))) !== pw.admin_hash) throw new UserError("admin_key is wrong");
+  const st = JSON.parse((await c.kv.get(`pwstats:${pw.id}`)) || '{"packs":0,"calls_sold":0,"calls_served":0,"revenue":0}');
+  return { ...publicPaywall(c, pw), upstream_url: pw.upstream, recipient: pw.recipient, stats: { ...st, revenue: `${st.revenue} ${pw.token}` },
+    note: "Revenue is paid straight to your wallet by each buyer's swap; this is a tally of completed packs. calls_served is approximate (sampled)." };
+}
+async function setPaywallEnabled(c, a) {
+  const pw = await loadPaywall(c, a.paywall_id);
+  if (!a.admin_key || (await sha256hex(String(a.admin_key))) !== pw.admin_hash) throw new UserError("admin_key is wrong");
+  pw.enabled = a.enabled === true || a.enabled === "true";
+  if (a.listed !== undefined) pw.listed = (a.listed === true || a.listed === "true") && !pw.test;
+  await c.kv.put(`pw:${pw.id}`, JSON.stringify(pw));
+  await dirUpsert(c, pw);
+  return { paywall_id: pw.id, enabled: pw.enabled, listed: pw.listed, message: pw.enabled ? "Paywall is ON." : "Paywall is OFF: new purchases and paid calls are refused until you switch it back on." };
+}
+function paywall402(c, pw, reason) {
+  return json({
+    error: "payment_required", reason,
+    paywall: publicPaywall(c, pw),
+    how_to_pay: {
+      easiest: `Hand ${gatewayUrl(c, pw.id)} to Swap Ripper's pay tool (MCP: ${c.origin}/mcp) with pay_with_token, pay_with_chain and refund_address. It buys a pack and returns your access_key.`,
+      step_by_step: [`POST ${gatewayUrl(c, pw.id)}/_buy  (optional JSON {"access_key": "..."} to top up an existing key)`,
+        "Pay the returned payment_link with any coin on any chain.", "Retry your request with header X-Access-Key: <access_key>."],
+    },
+  }, 402, { "X-Payment-Required": "swap-ripper-paywall", "Cache-Control": "no-store" });
+}
+const PASS_REQ = ["content-type", "accept", "accept-language", "user-agent"];
+const PASS_RES = ["content-type", "cache-control", "content-language", "etag", "last-modified"];
+async function handleGateway(request, url, c) {
+  const m = url.pathname.match(/^\/g\/(pw_[a-z0-9]{12})(\/.*)?$/);
+  if (!m) return json({ error: "Not found" }, 404);
+  let pw; try { pw = await loadPaywall(c, m[1]); } catch (e) { return json({ error: e.message }, 404); }
+  const sub = m[2] || "/";
+  track(c, "gateway_requests");
+  if (sub === "/_info") return json(publicPaywall(c, pw));
+  if (sub === "/_buy") {
+    if (request.method !== "POST") return json({ error: "Use POST" }, 405);
+    let body = {}; try { body = await request.json(); } catch { /* empty ok */ }
+    try { return json(await buyAccess(c, { ...body, paywall_id: pw.id })); } catch (e) { return json({ error: e.message }, e instanceof UserError ? 400 : 502); }
+  }
+  if (!pw.enabled) return json({ error: "This paywall is switched off by its owner." }, 503);
+  const auth = request.headers.get("x-access-key") || (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("access_key") || "";
+  const key = AK.test(auth.trim()) ? auth.trim() : null;
+  if (!key) return paywall402(c, pw, "No access key. Buy a pack first.");
+  let rec = JSON.parse((await c.kv.get(`ak:${key}`)) || "null");
+  if (!rec || rec.paywall !== pw.id) return paywall402(c, pw, "This access key isn't valid for this API.");
+  if (rec.calls_left <= 0) rec = await activateCredits(c, key, rec);
+  if (rec.calls_left <= 0) return paywall402(c, pw, (rec.pending || []).length ? "Your pack isn't paid yet (or the payment is still processing). Pay its payment_link, then retry." : "Out of credits. Buy another pack (POST /_buy with your access_key) to top up.");
+  // forward
+  const len = Number(request.headers.get("content-length") || 0);
+  if (len > PW_MAX_BODY) return json({ error: "Request body too large (max 1 MB)" }, 413);
+  const target = new URL(pw.upstream + (sub === "/" ? "" : sub));
+  url.searchParams.forEach((v, k) => { if (k !== "access_key") target.searchParams.append(k, v); });
+  const h = new Headers();
+  for (const k of PASS_REQ) { const v = request.headers.get(k); if (v) h.set(k, v); }
+  if (pw.header) h.set(pw.header.name, pw.header.value);
+  h.set("X-Forwarded-By", "swap-ripper-paywall");
+  let body;
+  if (!["GET", "HEAD"].includes(request.method)) { body = await request.arrayBuffer(); if (body.byteLength > PW_MAX_BODY) return json({ error: "Request body too large (max 1 MB)" }, 413); }
+  rec.calls_left -= 1;
+  try { await c.kv.put(`ak:${key}`, JSON.stringify(rec), { expirationTtl: 400 * 86400 }); }
+  catch { return json({ error: "Paid calls are temporarily paused (credit storage unavailable). Your credits are safe; try again shortly." }, 503); }
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), PW_TIMEOUT_MS);
+  let up;
+  try { up = await fetch(target.toString(), { method: request.method, headers: h, body, redirect: "manual", signal: ctl.signal }); }
+  catch {
+    rec.calls_left += 1; await c.kv.put(`ak:${key}`, JSON.stringify(rec), { expirationTtl: 400 * 86400 }); // refund the credit
+    return json({ error: "The API behind this paywall didn't respond. Your credit was not used." }, 504);
+  } finally { clearTimeout(t); }
+  if (up.status >= 500 || (up.status >= 300 && up.status < 400)) { rec.calls_left += 1; await c.kv.put(`ak:${key}`, JSON.stringify(rec), { expirationTtl: 400 * 86400 }); }
+  if (Math.random() < 0.25) { // sampled (x4) to save KV writes; calls_served is approximate
+    try {
+      const sk = `pwstats:${pw.id}`; const stt = JSON.parse((await c.kv.get(sk)) || '{"packs":0,"calls_sold":0,"calls_served":0,"revenue":0}');
+      stt.calls_served += 4; if (PENDING) PENDING(c.kv.put(sk, JSON.stringify(stt))); else await c.kv.put(sk, JSON.stringify(stt));
+    } catch { /* ignore */ }
+  }
+  const rh = new Headers(cors);
+  for (const k of PASS_RES) { const v = up.headers.get(k); if (v) rh.set(k, v); }
+  rh.set("X-Credits-Remaining", String(rec.calls_left));
+  if (up.status >= 300 && up.status < 400) return json({ error: "The API tried to redirect; redirects aren't forwarded." }, 502);
+  return new Response(up.body, { status: up.status, headers: rh });
+}
+
 // ---- Payment links: humans or agents get paid exactly N tokens; payer uses any token
 async function createPaymentLink(c, a) {
   const dst = await resolveToken(c, a.token, a.chain);
@@ -1223,14 +1465,18 @@ async function createPaymentLink(c, a) {
 
 // ---- anonymous usage counters (per day, counts only; no IPs or addresses stored)
 let PENDING = null; // set per request to ctx.waitUntil
+// Business events are always counted; high-volume events are sampled (1 in 4, weighted) to save KV writes.
+const TRACK_ALWAYS = /^(swaps_|fast_swaps|paywall|policies_|webhooks_|links_created|pay_requests|x402_funds|mcp_connects|view:)/;
 function track(c, event) {
   if (!c.kv) return;
+  let weight = 1;
+  if (!TRACK_ALWAYS.test(event)) { if (Math.random() >= 0.25) return; weight = 4; }
   const day = new Date().toISOString().slice(0, 10);
   const job = (async () => {
     try {
       const k = `d:${day}`;
       const cur = JSON.parse((await c.kv.get(k)) || "{}");
-      cur[event] = (cur[event] || 0) + 1;
+      cur[event] = (cur[event] || 0) + weight;
       await c.kv.put(k, JSON.stringify(cur), { expirationTtl: 60 * 60 * 24 * 400 });
     } catch { /* never break requests */ }
   })();
@@ -1425,7 +1671,7 @@ const TOOLS = [
   {
     name: "pay",
     title: "Pay anything: hand it any bill",
-    description: "One tool for any payment request. Pass whatever you were asked to pay: an x402 / HTTP 402 invoice, a Swap Ripper payment link, a Solana Pay link (solana:...), an Ethereum payment link (ethereum:..., EIP-681, any supported EVM chain), a Bitcoin link (bitcoin:...), plain text like 'send 20 USDC to 0xabc... on base', or {to, token, chain, amount}. Swap Ripper works out who gets what, then pays it EXACTLY using whatever token you hold on any chain. Call with only `request` to see what it understood; add pay_with_token, pay_with_chain and refund_address to get a deposit address.",
+    description: "One tool for any payment request. Pass whatever you were asked to pay: a Swap Ripper paywalled API URL (it buys access and returns an access_key), an x402 / HTTP 402 invoice, a Swap Ripper payment link, a Solana Pay link (solana:...), an Ethereum payment link (ethereum:..., EIP-681, any supported EVM chain), a Bitcoin link (bitcoin:...), plain text like 'send 20 USDC to 0xabc... on base', or {to, token, chain, amount}. Swap Ripper works out who gets what, then pays it EXACTLY using whatever token you hold on any chain. Call with only `request` to see what it understood; add pay_with_token, pay_with_chain and refund_address to get a deposit address.",
     inputSchema: { type: "object", required: ["request"], properties: {
       request: { description: "The payment request: link, URI, 402 body, plain text, or {to, token, chain, amount}.", anyOf: [{ type: "string" }, { type: "object" }] },
       amount: { type: "string", description: "Only if the request has no amount: how much the recipient should get." },
@@ -1433,6 +1679,7 @@ const TOOLS = [
       pay_with_chain: { type: "string", description: "Chain you pay from, e.g. 'solana'." },
       refund_address: { type: "string", description: "Your address on the paying chain, for automatic refunds." },
       wallet: { type: "string", description: "x402 only: YOUR address on the invoice's network (your x402 client signs from it)." },
+      access_key: { type: "string", description: "Paywalled APIs only: an existing access_key to top up." },
       speed: SPEED,
       request_id: REQUEST_ID,
       test: TEST,
@@ -1553,6 +1800,74 @@ const TOOLS = [
     } },
     annotations: { readOnlyHint: true, openWorldHint: false },
     run: verifyReceipt,
+  },
+  {
+    name: "create_paywall",
+    title: "Sell your API to agents (any coin)",
+    description: "For API/website OWNERS: put a paywall in front of any https API in seconds, no code. Set a price per pack (e.g. 1 USDC for 1000 calls) and your wallet. You get a gateway_url: agents calling it get HTTP 402 with buying instructions, pay with ANY coin on any chain (money goes straight to you), then their calls are forwarded to your API. Returns an admin_key for stats and an off switch. Add listed=true to appear in the public directory, test=true to try it free.",
+    inputSchema: { type: "object", required: ["upstream_url", "price_per_pack", "calls_per_pack", "recipient"], properties: {
+      upstream_url: { type: "string", description: "Your API's base URL (https), e.g. https://api.example.com/v1. Paths and queries after the gateway URL are appended." },
+      price_per_pack: { type: "string", description: "Price of one pack, in the token you receive, e.g. '1'. Must be worth at least $1." },
+      calls_per_pack: { type: "integer", description: "Calls included in one pack, e.g. 1000." },
+      recipient: { type: "string", description: "Your wallet address on the chain you receive on." },
+      token: { type: "string", description: "Token you receive (default USDC)." },
+      chain: { type: "string", description: "Chain you receive on (default base)." },
+      name: { type: "string", description: "Short name shown to buyers, e.g. 'Weather API'." },
+      description: { type: "string", description: "What your API does (shown in the directory)." },
+      upstream_header: { type: "string", description: "Optional secret header added to forwarded calls so only Swap Ripper can reach your API, e.g. 'Authorization: Bearer abc123'." },
+      listed: { type: "boolean", description: "List in the public directory (find_paywalls)." },
+      test: { type: "boolean", description: "Test paywall: only free test-mode payments count." },
+    } },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    run: createPaywall,
+  },
+  {
+    name: "find_paywalls",
+    title: "Find paid APIs agents can buy",
+    description: "Search the public directory of paywalled APIs (data, tools, services) that accept any coin. Returns name, price per call and gateway_url; buy with buy_access or by handing the gateway_url to the pay tool.",
+    inputSchema: { type: "object", properties: { query: { type: "string", description: "Words to search for, e.g. 'weather' or 'news'. Empty lists the newest." } } },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    run: findPaywalls,
+  },
+  {
+    name: "buy_access",
+    title: "Buy access to a paywalled API",
+    description: "Buy a pack of calls for a paywalled API (from a 402 response, find_paywalls or a gateway_url). Returns an access_key and a payment link payable with any coin. Add pay_with_token, pay_with_chain and refund_address to get deposit instructions right away. Pass an existing access_key to top it up. Credits activate automatically once paid; then send header X-Access-Key on calls to the gateway_url.",
+    inputSchema: { type: "object", properties: {
+      paywall_id: { type: "string", description: "e.g. pw_abc123... (or use gateway_url)." },
+      gateway_url: { type: "string", description: "The paywalled URL you called." },
+      access_key: { type: "string", description: "Optional: an existing key to top up." },
+      pay_with_token: { type: "string" }, pay_with_chain: { type: "string" }, refund_address: { type: "string" },
+      speed: SPEED, request_id: REQUEST_ID,
+    } },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    run: buyAccess,
+  },
+  {
+    name: "access_status",
+    title: "Credits left on an access key",
+    description: "Check how many paid calls an access_key has left, and whether any purchased packs are still waiting for payment (it activates them automatically once paid).",
+    inputSchema: { type: "object", required: ["access_key"], properties: { access_key: { type: "string" } } },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+    run: accessStatus,
+  },
+  {
+    name: "paywall_stats",
+    title: "Seller: sales and usage for your paywall",
+    description: "For paywall owners: packs sold, calls sold and served, revenue tally, and settings. Requires admin_key.",
+    inputSchema: { type: "object", required: ["paywall_id", "admin_key"], properties: { paywall_id: { type: "string" }, admin_key: { type: "string" } } },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    run: paywallStats,
+  },
+  {
+    name: "set_paywall_enabled",
+    title: "Seller: switch your paywall on/off or list it",
+    description: "For paywall owners: enabled=false stops new sales and paid calls instantly; listed=true/false shows or hides it in the public directory. Requires admin_key.",
+    inputSchema: { type: "object", required: ["paywall_id", "admin_key", "enabled"], properties: {
+      paywall_id: { type: "string" }, admin_key: { type: "string" }, enabled: { type: "boolean" }, listed: { type: "boolean" },
+    } },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    run: setPaywallEnabled,
   },
   {
     name: "create_spending_policy",
@@ -1691,9 +2006,9 @@ const TOOLS = [
     run: listChains,
   },
 ];
-const POLICY_LOCKED_BLOCK = new Set(["create_spending_policy", "set_policy_enabled"]);
+const POLICY_LOCKED_BLOCK = new Set(["create_spending_policy", "set_policy_enabled", "create_paywall", "set_paywall_enabled"]);
 const TOOL_MAP = Object.fromEntries(TOOLS.map((t) => [t.name, t]));
-const LITE = ["pay", "get_quote", "create_payment_link", "check_payment", "get_swap_status", "get_receipt"];
+const LITE = ["pay", "get_quote", "create_payment_link", "check_payment", "get_swap_status", "get_receipt", "buy_access", "access_status"];
 const publicTools = (c) => TOOLS.filter((t) => !(c && c.lite) || LITE.includes(t.name)).map(({ run, ...t }) => t);
 
 // ------------------------------------------------------------------ MCP JSON-RPC
@@ -1767,11 +2082,11 @@ async function handleRest(request, url, c) {
   if (request.method === "POST") {
     try { args = { ...args, ...(await request.json()) }; } catch { /* empty body ok */ }
   }
-  const map = { tokens: "search_tokens", chains: "list_chains", quote: "get_quote", swap: "create_swap", pay: "pay_exact", status: "get_swap_status", prices: "get_prices", compare: "compare_quotes", text: "quote_from_text", referrals: "referral_stats", link: "create_payment_link", invoice: "check_payment", receipt: "get_receipt", verify: "verify_receipt", limits: "create_spending_policy", policy: "policy_status", policy_enabled: "set_policy_enabled", gas: "refuel_gas", x402: "fund_x402", payany: "pay" };
+  const map = { tokens: "search_tokens", chains: "list_chains", quote: "get_quote", swap: "create_swap", pay: "pay_exact", status: "get_swap_status", prices: "get_prices", compare: "compare_quotes", text: "quote_from_text", referrals: "referral_stats", link: "create_payment_link", invoice: "check_payment", receipt: "get_receipt", verify: "verify_receipt", limits: "create_spending_policy", policy: "policy_status", policy_enabled: "set_policy_enabled", paywall: "create_paywall", paywalls: "find_paywalls", buy: "buy_access", access: "access_status", paywall_stats: "paywall_stats", paywall_enabled: "set_paywall_enabled", gas: "refuel_gas", x402: "fund_x402", payany: "pay" };
   const tool = TOOL_MAP[map[route]];
   if (tool) track(c, `rest:${route}`);
   if (!tool) return json({ error: "Unknown endpoint", endpoints: Object.keys(map).map((k) => `/api/${k}`) }, 404);
-  if (["swap", "pay", "compare", "gas", "x402", "payany", "verify", "limits", "policy_enabled"].includes(route) && request.method !== "POST") return json({ error: `Use POST for /api/${route}` }, 405);
+  if (["swap", "pay", "compare", "gas", "x402", "payany", "verify", "limits", "policy_enabled", "paywall", "buy", "paywall_enabled"].includes(route) && request.method !== "POST") return json({ error: `Use POST for /api/${route}` }, 405);
   if (c.policyId) {
     if (POLICY_LOCKED_BLOCK.has(tool.name)) return json({ error: "This connection is locked to a spending policy; that endpoint isn't available here." }, 403);
     args.policy_id = c.policyId;
@@ -1894,6 +2209,7 @@ table{border-collapse:collapse;width:100%}td{padding:6px 8px;border-top:1px soli
 <h2>Connect in 10 seconds</h2><pre>${origin}/mcp</pre><p>Want fewer tools in your agent's context? Use <code>${origin}/mcp/lite</code> (the 6 essentials). Building? Add <code>test: true</code> to any payment for a free sandbox run, and <code>request_id</code> so retries never pay twice.</p>
 <pre>{ "mcpServers": { "swap-ripper": { "url": "${origin}/mcp" } } }</pre>
 <h2>What agents can do</h2><table>${TOOLS.map((t) => `<tr><td><code>${t.name}</code></td><td>${t.description}</td></tr>`).join("")}</table>
+<h2>Sell your API to AI agents, in any coin</h2><p>Put a paywall in front of any API in 60 seconds, no code: agents get a 402, pay with any coin on any chain (straight to your wallet), and their calls go through. Signed receipts, payment tracking and a public directory included. <a href="/sell"><b>Create a paywall →</b></a></p>
 <h2>Spending limits owners can trust</h2><p>Owners set limits (per payment, per day, chains, tokens, recipients) and give their agent a policy-locked URL. Anything over the limits is refused before payment instructions exist, with a spending log and an instant off switch. <a href="/limits"><b>Set limits for your agent →</b></a></p>
 <h2>Get paid, with proof</h2><p>Payment links are trackable invoices (add a <code>webhook_url</code> and your server is notified the moment it is paid): <code>check_payment</code> tells a selling agent when it has been paid, and <code>get_receipt</code> issues a signed receipt that anyone can verify with <code>verify_receipt</code>. Deliver only after you are paid.</p>
 <h2>Pay anything</h2><p>Hand the <code>pay</code> tool any bill: an x402 invoice, a Solana Pay or Ethereum payment link, a Bitcoin link, a payment link, or just "send 20 USDC to 0x… on Base". It works out who gets what and pays it exactly with whatever you hold, on any chain.</p>
@@ -1919,6 +2235,56 @@ const PAY_WITH = [
   ["ETH", "eth"], ["ETH", "base"], ["ETH", "arb"], ["SOL", "sol"], ["BTC", "btc"], ["BNB", "bsc"],
   ["NEAR", "near"], ["ZEC", "zec"], ["DOGE", "doge"], ["XRP", "xrp"], ["TRX", "tron"], ["TON", "ton"], ["SUI", "sui"],
 ];
+
+function sellPage() {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sell your API to AI agents, paid in any crypto · Swap Ripper</title><link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="description" content="Put a paywall in front of any API in 60 seconds. AI agents pay with any coin on any chain, straight to your wallet. No code, non-custodial.">
+<style>:root{color-scheme:light dark;--b:rgba(127,127,127,.35)}*{box-sizing:border-box}body{font:16px/1.5 system-ui,sans-serif;max-width:600px;margin:32px auto;padding:0 16px}
+.card{border:1px solid var(--b);border-radius:14px;padding:20px;margin:14px 0}h1{font-size:24px;margin:0 0 4px}h2{font-size:18px;margin:0 0 8px}.sub{opacity:.75;margin:0 0 10px}
+label{display:block;font-size:13px;opacity:.8;margin:12px 0 4px}input,button,textarea{font:inherit;width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--b);background:transparent;color:inherit}
+input[type=checkbox]{width:auto;margin-right:6px}.chk{display:flex;align-items:center;margin-top:12px;font-size:14px}
+button{background:#5b5bf0;color:#fff;border:none;margin-top:16px;cursor:pointer;font-weight:600}button.sec{background:transparent;color:inherit;border:1px solid var(--b)}
+.mono{font-family:ui-monospace,monospace;word-break:break-all;font-size:13px;background:rgba(127,127,127,.12);padding:10px;border-radius:8px}.row{display:flex;gap:8px}.row>*{flex:1}
+.warn{background:rgba(255,170,0,.15);border-radius:8px;padding:10px;font-size:14px}.err{color:#d33}.ok{color:#1a9b4b;font-weight:600}.muted{opacity:.65;font-size:13px}ol{padding-left:18px}</style></head><body>
+<h1>💸 Sell your API to AI agents</h1><p class="sub">Paste your API's address, set a price, add your wallet. Agents pay with <b>any coin on any chain</b>, the money goes <b>straight to you</b>, and their calls go through. No code, no account.</p>
+<div class="card"><h2>Create a paywall</h2>
+<label>Your API's base URL (https)</label><input id="up" placeholder="https://api.example.com/v1">
+<div class="row"><div><label>Price per pack</label><input id="pr" value="1"></div><div><label>Calls per pack</label><input id="cl" type="number" value="1000"></div></div>
+<div class="row"><div><label>You receive (token)</label><input id="tk" value="USDC"></div><div><label>On chain</label><input id="ch" value="base"></div></div>
+<label>Your wallet address (on that chain)</label><input id="rc" placeholder="0x...">
+<label>Name</label><input id="nm" placeholder="e.g. Weather API">
+<label>What it does (shown to buyers)</label><input id="ds" placeholder="e.g. Hourly forecasts for any city">
+<label>Optional secret header for your API</label><input id="hd" placeholder="Authorization: Bearer your-key">
+<label class="chk"><input type="checkbox" id="ls" checked> List it in the public directory agents search</label>
+<label class="chk"><input type="checkbox" id="ts"> Test mode (free fake payments, for trying it out)</label>
+<button id="mk">Create paywall</button><div id="out"></div></div>
+<div class="card"><h2>Your sales</h2><label>Paywall ID</label><input id="sid" placeholder="pw_..."><label>Admin key</label><input id="sak" type="password" placeholder="adm_...">
+<div class="row"><button class="sec" id="st">Show stats</button><button class="sec" id="off">Switch OFF</button><button class="sec" id="on">Switch ON</button></div><div id="sout"></div></div>
+<div class="card"><h2>How agents buy</h2><ol><li>They call your gateway URL and get a <b>402</b> with instructions.</li><li>They buy a pack with any coin (Swap Ripper's <code>pay</code> tool does it in one step).</li><li>They call again with their access key; requests are forwarded to your API with credits counted down.</li></ol>
+<p class="muted">Swap Ripper never holds money: each buyer's payment goes directly to your wallet. You get signed receipts and a sales tally.</p></div>
+<p class="muted"><a href="/">Swap Ripper</a> · Don't paywall APIs you don't own or have rights to resell. Not available in sanctioned jurisdictions.</p>
+<script>
+const e=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const post=async(p,b)=>(await fetch(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)})).json();
+const v=(id)=>document.getElementById(id).value.trim(), on=(id)=>document.getElementById(id).checked;
+document.getElementById("mk").onclick=async()=>{const o=document.getElementById("out");o.innerHTML="<p>Creating…</p>";
+ const b={upstream_url:v("up"),price_per_pack:v("pr"),calls_per_pack:Number(v("cl")),token:v("tk"),chain:v("ch"),recipient:v("rc"),name:v("nm"),description:v("ds"),listed:on("ls"),test:on("ts")};
+ if(v("hd"))b.upstream_header=v("hd");
+ const j=await post("/api/paywall",b);
+ if(j.error){o.innerHTML='<p class="err">'+e(j.error)+'</p>';return;}
+ document.getElementById("sid").value=j.paywall_id;
+ o.innerHTML='<p class="ok">Your paywall is live.</p><label>Share this URL with agents</label><div class="mono">'+e(j.gateway_url)+'</div>'+
+ '<label>Price</label><div class="mono">'+e(j.price)+' for '+e(j.calls_per_pack)+' calls ('+e(j.price_per_call)+' per call)</div>'+
+ '<label>Paywall ID</label><div class="mono">'+e(j.paywall_id)+'</div><label>Admin key: save it now, it is shown only once</label><div class="mono">'+e(j.admin_key)+'</div>'+
+ '<p class="warn">Keep the admin key private. It is the only way to see sales and switch the paywall off.</p>';};
+const show=(j)=>{const o=document.getElementById("sout");if(j.error){o.innerHTML='<p class="err">'+e(j.error)+'</p>';return;}
+ o.innerHTML=j.stats?('<p>Packs sold: <b>'+e(j.stats.packs)+'</b> · Calls sold: <b>'+e(j.stats.calls_sold)+'</b> · Calls served: <b>'+e(j.stats.calls_served)+'</b> · Revenue: <b>'+e(j.stats.revenue)+'</b> · '+(j.enabled?'<span class="ok">ON</span>':'<span class="err">OFF</span>')+'</p>'):'<p>'+e(j.message)+'</p>';};
+document.getElementById("st").onclick=async()=>show(await (await fetch("/api/paywall_stats?"+new URLSearchParams({paywall_id:v("sid"),admin_key:v("sak")}))).json());
+document.getElementById("off").onclick=async()=>show(await post("/api/paywall_enabled",{paywall_id:v("sid"),admin_key:v("sak"),enabled:false}));
+document.getElementById("on").onclick=async()=>show(await post("/api/paywall_enabled",{paywall_id:v("sid"),admin_key:v("sak"),enabled:true}));
+</script></body></html>`;
+}
 
 function limitsPage() {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -2083,6 +2449,7 @@ export default {
         const u2 = new URL(url); u2.pathname = "/api" + (pm[3] || "/");
         return await handleRest(request, u2, c);
       }
+      if (path.startsWith("/g/")) return await handleGateway(request, url, c);
       if (path === "/mcp/lite") { c.lite = true; return await handleMcp(request, c); }
       if (path === "/mcp" || (path === "/" && request.method === "POST")) return await handleMcp(request, c);
       if (path.startsWith("/api")) return await handleRest(request, url, c);
@@ -2094,6 +2461,7 @@ export default {
       }
       if (path === "/.well-known/agent.json" || path === "/.well-known/agent-card.json") { track(c, "view:agent_card"); return json(agentCard(origin)); }
       if (path === "/server.json") return json(serverJson(origin));
+      if (path === "/sell") { track(c, "view:sell"); return text(sellPage(), "text/html"); }
       if (path === "/limits") { track(c, "view:limits"); return text(limitsPage(), "text/html"); }
       if (path === "/icon.svg" || path === "/favicon.svg" || path === "/favicon.ico") return new Response(ICON_SVG, { headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400", ...cors } });
       if (path === "/health") return json({ ok: true, version: VERSION, fee_bps: c.feeBps, fee_recipient_set: !!c.feeTo, api_key_set: !!c.jwt });
