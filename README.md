@@ -1,182 +1,238 @@
-# ⚡ Swap Ripper: cross-chain swaps, x402 funding, payments and gas for AI agents
+<p align="center">
+  <img src="https://raw.githubusercontent.com/swapripper/swap-ripper/main/assets/banner.png" alt="Swap Ripper: money for AI agents, in any coin" width="100%">
+</p>
 
-**One MCP tool call to swap any token across 25+ blockchains.** Bitcoin, Ethereum, Solana, Base, Arbitrum, BNB, Tron, NEAR, Zcash, TON, Sui, XRP, Doge and more.
+<p align="center">
+  <a href="https://swap-ripper.szydlow45.workers.dev"><img src="https://img.shields.io/badge/live-swap--ripper-6D3AED?style=flat-square" alt="Live"></a>
+  <img src="https://img.shields.io/badge/MCP-streamable%20HTTP-0891B2?style=flat-square" alt="MCP">
+  <img src="https://img.shields.io/badge/chains-25%2B-14213D?style=flat-square" alt="25+ chains">
+  <img src="https://img.shields.io/badge/API%20key-not%20needed-0F8A5F?style=flat-square" alt="No API key">
+  <img src="https://img.shields.io/badge/fee-0.2%25-4A5878?style=flat-square" alt="0.2% fee">
+  <img src="https://img.shields.io/badge/license-MIT-4A5878?style=flat-square" alt="MIT">
+</p>
 
-No API key. No sign-up. No wallet connection. Non-custodial, with automatic refunds. Powered by the [NEAR Intents](https://near-intents.org) solver network.
+<p align="center">
+  <a href="https://swap-ripper.szydlow45.workers.dev"><b>Website</b></a> ·
+  <a href="https://swap-ripper.szydlow45.workers.dev/sell"><b>Sell your API</b></a> ·
+  <a href="https://swap-ripper.szydlow45.workers.dev/limits"><b>Spending limits</b></a> ·
+  <a href="https://swap-ripper.szydlow45.workers.dev/pay"><b>Payment links</b></a>
+</p>
+
+**Swap Ripper is an MCP server that lets AI agents pay and get paid in any crypto, on any chain.** Your agent hands it a bill in any format and pays with whatever coin it holds. The other side receives exactly what it asked for. Swap Ripper never holds the money.
+
+## Connect in 10 seconds
 
 ```
 https://swap-ripper.szydlow45.workers.dev/mcp
 ```
 
-## New: sell your API to AI agents (Agent Paywall)
+| Client | How |
+|---|---|
+| **Claude Code** | `claude mcp add --transport http swap-ripper https://swap-ripper.szydlow45.workers.dev/mcp` |
+| **Claude Desktop, Cursor, Windsurf** | `{ "mcpServers": { "swap-ripper": { "url": "https://swap-ripper.szydlow45.workers.dev/mcp" } } }` |
+| **Want fewer tools?** | Use `/mcp/lite`: 8 essential tools, smaller context |
+| **No MCP?** | REST API ([OpenAPI](https://swap-ripper.szydlow45.workers.dev/openapi.json)) or [llms.txt](https://swap-ripper.szydlow45.workers.dev/llms.txt) |
 
-Put a paywall in front of **any https API** in 60 seconds, with no code. Use the web page at **[/sell](https://swap-ripper.szydlow45.workers.dev/sell)** or the `create_paywall` tool.
+## What your agent can do
 
-1. Set a price per pack (e.g. **1 USDC for 1000 calls**) and your wallet. You get a **gateway URL** like `https://swap-ripper.szydlow45.workers.dev/g/pw_...`.
-2. Agents calling it without access get **HTTP 402** with instructions. They pay with **any coin on any chain**, and the money goes **straight to your wallet**. Our `pay` tool does it in one step: hand it the gateway URL.
-3. They call again with `X-Access-Key: ak_...`. Requests (path, query, body) are forwarded to your API, and credits count down (`X-Credits-Remaining`). If your API errors or is down, the credit isn't used.
-4. Optional: a secret header so only Swap Ripper can reach your API, a public directory listing (`find_paywalls`), stats and an off switch (`paywall_stats`, `set_paywall_enabled`), and test mode.
+<table>
+<tr>
+<td width="50%" valign="top">
 
-Buyers: `find_paywalls` → `buy_access` (or `pay` with the gateway URL) → call with `X-Access-Key` → `access_status`.
+### 💸 Pay any bill
+Hand `pay` an HTTP 402 invoice, a Solana Pay or Ethereum payment link, a Bitcoin link, or plain English like `send 20 USDC to 0xabc… on base`. It pays the exact amount from any coin on any chain.
 
-## Built for builders
+</td>
+<td width="50%" valign="top">
 
-- **Test mode**: add `test: true` to any payment (or create a test invoice) and get a fake deposit address that completes by itself in ~15 seconds. Status, invoices, receipts, webhooks and spending limits all work, with no real money. Test payments can never pay a real invoice.
-- **No double payments**: pass your own `request_id` on payments. Retrying with the same ID returns the same payment instructions instead of creating a second payment.
-- **Lite connection**: `https://swap-ripper.szydlow45.workers.dev/mcp/lite` exposes only the 6 essentials (pay, get_quote, create_payment_link, check_payment, get_swap_status, get_receipt) to keep your agent's context small. The full `/mcp` keeps every tool.
+### 🧾 Get paid by anyone
+`create_payment_link` makes an invoice the payer can settle in any coin. You receive exactly what you asked for, get a signed webhook when it's paid, and can prove it with a signed receipt.
 
-## Spending limits owners can trust
+</td>
+</tr>
+<tr>
+<td valign="top">
 
-Owners create a policy (max per payment, max per day, optional allowed chains, tokens and recipients) at **[/limits](https://swap-ripper.szydlow45.workers.dev/limits)** or with `create_spending_policy`, then give their agent a **policy-locked URL** (`/mcp/p/<policy_id>`). Every swap and payment through it is checked first and refused if it breaks a rule, before any payment instructions exist. The private admin key shows the spending log and works as an instant off switch (`set_policy_enabled`). Swap Ripper never holds funds.
+### 🔌 Sell your API to agents
+Put a paywall in front of any https API in about a minute, with no code ([/sell](https://swap-ripper.szydlow45.workers.dev/sell)). Agents pay in any coin, the money goes straight to your wallet, and calls are counted for you.
 
-## Get paid, with proof
+</td>
+<td valign="top">
 
-- `create_payment_link` now returns an **invoice_id**. The payer can use any token on any chain; you receive exactly what you asked for.
-- Add `webhook_url` and Swap Ripper **POSTs a signed notification** (with the receipt) to your server within minutes of payment: no polling. Verify `X-SwapRipper-Signature` = `sha256=` + HMAC-SHA256(webhook secret, raw body).
-- `check_payment` tells you whether the invoice is **unpaid, processing or paid**, with blockchain transaction hashes. Deliver your service only after it's paid. Payments only count if they pay the right recipient, token, chain and full amount.
-- `get_receipt` issues a **signed receipt** for any completed swap or payment. `verify_receipt` (or `POST /api/verify`) lets anyone confirm it's genuine and unchanged.
+### 🛡️ Stay within limits
+Owners set a max per payment, max per day, and allowed chains or recipients ([/limits](https://swap-ripper.szydlow45.workers.dev/limits)). The agent gets a locked URL, and anything over the limit is refused before money moves.
 
-## New: pay anything
+</td>
+</tr>
+</table>
 
-Hand the `pay` tool **any** payment request and it pays it exactly, using whatever token you hold on any chain:
+<p align="center">
+  <img src="https://raw.githubusercontent.com/swapripper/swap-ripper/main/assets/flow.png" alt="How a payment flows: your agent pays with any token, Swap Ripper reads the bill, checks limits and picks the cheaper network, and the recipient gets the exact amount" width="100%">
+</p>
 
-- x402 / HTTP 402 invoices (v1 or v2, body or base64 header)
-- Solana Pay links (`solana:...?amount=&spl-token=`)
-- Ethereum payment links, EIP-681 (`ethereum:0x...@8453?value=` or `/transfer?address=&uint256=`), on Ethereum, Base, Arbitrum, Optimism, BNB, Polygon, Avalanche, Gnosis, Berachain
-- Bitcoin links, BIP21 (`bitcoin:bc1...?amount=`)
-- Swap Ripper payment links
-- Plain text: `send 20 USDC to 0xabc... on base`
-- JSON: `{ "to": "0x...", "token": "USDC", "chain": "base", "amount": "20" }`
+<p align="center">
+  <img src="https://raw.githubusercontent.com/swapripper/swap-ripper/main/assets/chat.png" alt="Example: an agent hits an HTTP 402 for 2 USDC on Base, holds only SOL, calls pay, and the seller receives exactly 2 USDC" width="100%">
+</p>
 
-Call it with only `request` to see what it understood, then add `pay_with_token`, `pay_with_chain` and `refund_address` to get a deposit address. If you already hold the right token, it tells you to pay directly with no fee.
+## Why agents pick it
 
-## New: got an HTTP 402? Pay it from any chain
+| | |
+|---|---|
+| **One tool for every bill** | x402 (v1 and v2), Solana Pay, EIP-681, BIP21, payment links, JSON or plain English |
+| **Best price, checked** | Every payment is quoted on NEAR Intents and Relay at once, and the cheaper one wins. If one is down, the other takes over |
+| **Fast when it matters** | `speed: "fast"` fills in about 1–5 seconds |
+| **Safe to retry** | Pass a `request_id` and a retry never pays twice |
+| **Test without money** | `test: true` gives a fake payment that completes in about 15 seconds |
+| **Never holds funds** | One-time deposit addresses, automatic refunds if a route fails |
 
-x402 paywalls usually ask for USDC on Base, but your agent's money is on Solana, Ethereum or Bitcoin. Pass the 402 response to **`fund_x402`**. It accepts x402 v1 or v2, either the JSON body or the base64 `PAYMENT-REQUIRED` header. Swap Ripper then:
+## Tools
 
-1. decodes the invoice and picks a network/token it can fund (testnets are flagged),
-2. tops up **your own wallet** on that chain with an exact amount (default ~$5, which covers hundreds of $0.01 calls), paid from any token on any chain,
-3. leaves your normal x402 client to sign and pay the invoice, so no custody and no trust in us for the payment itself.
+<details>
+<summary><b>Paying</b>: pay, fund_x402, pay_exact, refuel_gas, create_swap</summary>
 
-```json
-POST /api/x402
-{ "payment_required": { "x402Version": 2, "accepts": [ ... ] },
-  "pay_with_token": "USDC", "pay_with_chain": "solana",
-  "wallet": "0xYourBaseWallet", "refund_address": "YourSolanaAddress" }
-```
+| Tool | What it does |
+|---|---|
+| `pay` | Pay any payment request exactly, using any token you hold |
+| `fund_x402` | Got an HTTP 402? Tops up your own wallet on the right chain so your x402 client can pay it |
+| `pay_exact` | Recipient gets exactly N tokens, paid with anything |
+| `refuel_gas` | A few dollars of gas on any chain (ETH on Base, SOL, BNB, TRX, SUI and more) |
+| `create_swap` | Lock a quote and get a one-time deposit address |
+</details>
 
-Call it with only `payment_required` to decode the invoice and get a cost estimate first.
+<details>
+<summary><b>Getting paid</b>: create_payment_link, check_payment, get_receipt, verify_receipt</summary>
 
-## Best price or fastest: you choose
+| Tool | What it does |
+|---|---|
+| `create_payment_link` | "Pay me in any crypto" invoice, with optional signed webhook |
+| `check_payment` | Unpaid, processing or paid, with transaction proof |
+| `get_receipt` / `verify_receipt` | Signed receipts anyone can check |
+</details>
 
-- **Default (`best_price`)**: every swap and payment is quoted on **two networks at once** (NEAR Intents and Relay) and sent through whichever is cheaper for you. If one network is down or can't do a route, the other takes over automatically. The reply's `route_choice` shows both prices.
-- **`speed: "fast"`**: routed through Relay, fills in about 1-5 seconds, usually slightly less output. Works on `create_swap`, `pay_exact`, `refuel_gas` and `fund_x402`. Track it with `get_swap_status` and `route: "fast"`.
+<details>
+<summary><b>Selling and buying API access</b>: create_paywall, find_paywalls, buy_access, access_status, paywall_stats, set_paywall_enabled</summary>
 
-`get_quote` shows both options side by side (`fast_option`).
+| Tool | What it does |
+|---|---|
+| `create_paywall` | Sell any https API per pack of calls |
+| `find_paywalls` | Browse paid APIs agents can buy |
+| `buy_access` / `access_status` | Buy a pack, check credits left |
+| `paywall_stats` / `set_paywall_enabled` | Sales numbers and an off switch for sellers |
+</details>
 
-## Connect
+<details>
+<summary><b>Spending limits</b>: create_spending_policy, policy_status, set_policy_enabled</summary>
 
-**Claude Desktop / Cursor / any MCP client:**
-```json
-{ "mcpServers": { "swap-ripper": { "url": "https://swap-ripper.szydlow45.workers.dev/mcp" } } }
-```
+| Tool | What it does |
+|---|---|
+| `create_spending_policy` | Per-payment and per-day caps, allowed chains, tokens and recipients |
+| `policy_status` | Spending log and what's left today |
+| `set_policy_enabled` | Instant off switch |
+</details>
 
-**Claude Code:**
-```bash
-claude mcp add --transport http swap-ripper https://swap-ripper.szydlow45.workers.dev/mcp
-```
+<details>
+<summary><b>Prices and lookups</b>: get_quote, quote_from_text, compare_quotes, get_swap_status, get_prices, search_tokens, list_chains, referral_stats</summary>
 
-**No MCP?** Use the REST API ([OpenAPI spec](https://swap-ripper.szydlow45.workers.dev/openapi.json)) or point your agent at [llms.txt](https://swap-ripper.szydlow45.workers.dev/llms.txt).
+| Tool | What it does |
+|---|---|
+| `get_quote` | Live price with a fair-price check, plus the fast option |
+| `quote_from_text` | `"25 USDC on solana to ETH on base"` |
+| `compare_quotes` | Up to 10 routes at once |
+| `get_swap_status` | Track a payment, with long-polling |
+| `get_prices` / `search_tokens` / `list_chains` | Prices and discovery |
+| `referral_stats` | What your referral account has earned |
+</details>
 
-### Agent frameworks
+## Use it from your framework
 
-**ElizaOS** (via the official `@elizaos/plugin-mcp`), in your character file:
-```json
-{
-  "plugins": ["@elizaos/plugin-mcp"],
-  "settings": {
-    "mcp": { "servers": { "swap-ripper": { "type": "streamable-http", "url": "https://swap-ripper.szydlow45.workers.dev/mcp" } } }
-  }
-}
-```
+<details>
+<summary><b>LangChain / LangGraph</b></summary>
 
-**LangChain / LangGraph** (`pip install langchain-mcp-adapters`):
 ```python
 from langchain_mcp_adapters.client import MultiServerMCPClient
 client = MultiServerMCPClient({"swap-ripper": {"url": "https://swap-ripper.szydlow45.workers.dev/mcp", "transport": "streamable_http"}})
-tools = await client.get_tools()   # pass to your agent
+tools = await client.get_tools()
 ```
+</details>
 
-**OpenAI Agents SDK** (`pip install openai-agents`):
+<details>
+<summary><b>OpenAI Agents SDK</b></summary>
+
 ```python
 from agents import Agent, Runner
 from agents.mcp import MCPServerStreamableHttp
 async with MCPServerStreamableHttp(params={"url": "https://swap-ripper.szydlow45.workers.dev/mcp"}) as swap:
-    agent = Agent(name="trader", instructions="Use Swap Ripper for swaps and x402 funding.", mcp_servers=[swap])
+    agent = Agent(name="buyer", instructions="Use Swap Ripper to pay bills.", mcp_servers=[swap])
     print((await Runner.run(agent, "Quote 25 USDC on Solana to ETH on Base")).final_output)
 ```
+</details>
 
-**TypeScript (official MCP SDK)**:
+<details>
+<summary><b>TypeScript (MCP SDK)</b></summary>
+
 ```ts
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 const client = new Client({ name: "my-agent", version: "1.0.0" });
 await client.connect(new StreamableHTTPClientTransport(new URL("https://swap-ripper.szydlow45.workers.dev/mcp")));
-const res = await client.callTool({ name: "fund_x402", arguments: { payment_required: the402Body } });
+const res = await client.callTool({ name: "pay", arguments: { request: the402Body } });
 ```
+</details>
 
-**Plain HTTP** (no MCP at all):
+<details>
+<summary><b>ElizaOS</b></summary>
+
+```json
+{
+  "plugins": ["@elizaos/plugin-mcp"],
+  "settings": { "mcp": { "servers": { "swap-ripper": { "type": "streamable-http", "url": "https://swap-ripper.szydlow45.workers.dev/mcp" } } } }
+}
+```
+</details>
+
+<details>
+<summary><b>Plain HTTP</b></summary>
+
 ```bash
-curl -s -X POST https://swap-ripper.szydlow45.workers.dev/api/x402 -H 'content-type: application/json' -d '{"payment_required": <the 402 body>}'
+curl -s -X POST https://swap-ripper.szydlow45.workers.dev/api/x402 \
+  -H 'content-type: application/json' -d '{"payment_required": <the 402 body>}'
 ```
+</details>
 
-## Tools
+## Details for builders
 
-| Tool | What it does |
-|---|---|
-| `pay` | **Pay anything**: x402 invoices, Solana Pay, EIP-681, Bitcoin links, payment links or plain text, paid with any token. |
-| `check_payment` | Did I get paid? Invoice status with transaction proof. |
-| `get_receipt` / `verify_receipt` | Signed receipts anyone can verify. |
-| `create_spending_policy` / `policy_status` / `set_policy_enabled` | Owner spending limits, log and kill switch. |
-| `create_paywall` / `paywall_stats` / `set_paywall_enabled` | Sell your API to agents in any coin. |
-| `find_paywalls` / `buy_access` / `access_status` | Find and buy access to paid APIs. |
-| `fund_x402` | **Hit a 402 paywall?** Decode the x402 invoice and fund your wallet on the right chain from any chain. |
-| `get_quote` | Live cross-chain price, no addresses needed. Includes a **fair-price check** vs market rates. |
-| `quote_from_text` | Plain English: `"25 USDC on solana to ETH on base"` |
-| `create_swap` | Lock a quote and get a one-time deposit address. Output lands at the recipient automatically. |
-| `pay_exact` | Recipient gets **exactly** N tokens (e.g. 10 USDC on Base), paid with any token you hold. Good for invoices, x402 wallet top-ups and gas. |
-| `create_payment_link` | **"Pay me in any crypto" links.** The payer uses any token on any chain, and you receive exactly what you asked for. Good for agents selling services. [Try it](https://swap-ripper.szydlow45.workers.dev/pay) |
-| `refuel_gas` | **Gas station.** Get a few dollars of native gas (ETH on Base/Arbitrum/OP, SOL, BNB, POL, AVAX, TRX, TON, SUI…) on any chain, paid with any token. |
-| `compare_quotes` | Up to 10 routes in one call, with the best one picked. |
-| `get_swap_status` | Track a swap, with `wait_seconds` long-polling so agents make fewer calls. |
-| `get_prices` | Free USD prices across 25+ chains. |
-| `search_tokens` / `list_chains` | Discovery. |
-| `referral_stats` | See what your referrer account has earned. |
+<details>
+<summary><b>Webhooks and receipts</b></summary>
 
-Extras: ready-to-sign EVM deposit transactions, typo suggestions ("Did you mean USDC?"), automatic retries, human-readable amounts everywhere.
+Add `webhook_url` to `create_payment_link` and Swap Ripper POSTs a signed notification with the receipt within minutes of payment. Verify `X-SwapRipper-Signature` = `sha256=` + HMAC-SHA256(webhook secret, raw body). Payments only count if they pay the right recipient, token, chain and full amount. `POST /api/verify` checks any receipt.
+</details>
 
-## Example
+<details>
+<summary><b>How the API paywall works</b></summary>
 
-```
-get_quote { from_token: "USDC", from_chain: "solana", to_token: "ETH", to_chain: "base", amount: "25" }
-→ ~0.0148 ETH, ~20s, price_check: "good"
+1. Set a price per pack (for example 1 USDC for 1000 calls) and your wallet. You get a gateway URL like `/g/pw_...`.
+2. Agents without access get HTTP 402 with instructions, and can pay in any coin. `pay` with the gateway URL does it in one step.
+3. They call again with `X-Access-Key: ak_...`. Requests are forwarded to your API and `X-Credits-Remaining` counts down. If your API errors, the credit isn't used.
+4. Optional: a secret header so only Swap Ripper can reach your API, a public directory listing, and test mode.
+</details>
 
-create_swap { ...same, recipient: "0x…", refund_address: "<solana address>" }
-→ send 25 USDC to deposit_address on Solana → ETH arrives on Base
-```
+<details>
+<summary><b>Spending-limit URLs</b></summary>
 
-## Fees and referrals
-- **0.20%** service fee, built into every quote (**0.15%** over $10k). Every quote includes a live `best_price_check` against Relay, so you can see the proof.
-- **Referral program:** pass `referrer: "yourname.near"` on any call and earn **1/3 of the fee** on every swap you route, paid on-chain automatically. Users pay the same price.
+Create a policy at [/limits](https://swap-ripper.szydlow45.workers.dev/limits) or with `create_spending_policy`, then give the agent `/mcp/p/<policy_id>` (or `/api/p/<policy_id>/...`). Every payment through it is checked first. The private admin key shows the log and turns it off instantly.
+</details>
 
-## Safety
-- Non-custodial: this service never holds funds. Deposits go to one-time NEAR Intents addresses, and refunds are automatic if a swap can't complete.
-- Address sanity checks before any deposit address is issued.
+## Fees, referrals and safety
+
+- **0.20%** fee, built into every quote (0.15% over $10k). Paying in the coin the recipient already wants? It tells you to pay directly, with no fee.
+- **Referrals:** pass `referrer: "yourname.near"` and earn one third of the fee on every payment you route, paid on-chain. Users pay the same price.
+- **Non-custodial:** one-time deposit addresses, automatic refunds, address checks before any deposit address is issued.
 - Not available to sanctioned persons or in sanctioned jurisdictions. Provided as-is. Always double-check addresses.
 
 ## Self-host
-`worker.js` is a single-file Cloudflare Worker with no dependencies. Set `FEE_RECIPIENT`, `FEE_BPS` and the `ONECLICK_JWT` secret, and optionally bind a KV namespace as `STATS`.
 
-Also for humans: [@IntentsSwapRipperBot](https://t.me/IntentsSwapRipperBot) on Telegram.
+`worker.js` is a single-file Cloudflare Worker with no dependencies. Set `FEE_RECIPIENT`, `FEE_BPS` and the `ONECLICK_JWT` secret, and optionally bind a KV namespace as `STATS`. Relay routing needs `RELAY_API_KEY` and `RELAY_FEE_TO`.
+
+For people, not agents: [@IntentsSwapRipperBot](https://t.me/IntentsSwapRipperBot) on Telegram.
 
 MIT License
