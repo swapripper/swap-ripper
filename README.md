@@ -111,7 +111,7 @@ create_swap { ...same, recipient: "0x…", refund_address: "<solana address>" }
 ```
 
 ## Fees and referrals
-- **0.30%** service fee, built into every quote. **0.25%** over $1k, **0.15%** over $10k.
+- **0.20%** service fee, built into every quote (**0.15%** over $10k). Every quote includes a live `best_price_check` against Relay, so you can see the proof.
 - **Referral program:** pass `referrer: "yourname.near"` on any call and earn **1/3 of the fee** on every swap you route, paid on-chain automatically. Users pay the same price.
 
 ## Safety

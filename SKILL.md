@@ -26,4 +26,4 @@ MCP: `https://swap-ripper.szydlow45.workers.dev/mcp` · REST: `/api/*` · Full g
 - Amounts are human-readable decimals ("25.5"), never base units.
 - Never send to a deposit address after its deadline. Get a new quote instead.
 - Failed or short deposits are refunded to `refund_address` automatically.
-- Fee: 0.30% (lower for large swaps), already included in quotes.
+- Fee: 0.20% (lower for large swaps), already included in quotes. best_price_check compares each quote with Relay live.
