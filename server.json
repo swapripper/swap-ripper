@@ -1,0 +1,27 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.swapripper/swap-ripper",
+  "title": "Swap Ripper",
+  "description": "Payments for AI agents in any coin: pay any bill, get paid, sell your API. One-tap wallet approval.",
+  "version": "3.5.0",
+  "repository": {
+    "url": "https://github.com/swapripper/swap-ripper",
+    "source": "github"
+  },
+  "websiteUrl": "https://swap-ripper.szydlow45.workers.dev",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://swap-ripper.szydlow45.workers.dev/mcp"
+    }
+  ],
+  "icons": [
+    {
+      "src": "https://swap-ripper.szydlow45.workers.dev/icon.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": [
+        "any"
+      ]
+    }
+  ]
+}

@@ -18,7 +18,7 @@
   <a href="https://swap-ripper.szydlow45.workers.dev/pay"><b>Payment links</b></a>
 </p>
 
-**Swap Ripper is an MCP server that lets AI agents pay and get paid in any crypto, on any chain.** Your agent hands it a bill in any format and pays with whatever coin it holds. The other side receives exactly what it asked for. Swap Ripper never holds the money.
+**Swap Ripper is an MCP server that lets AI agents pay and get paid in any crypto, on any chain.** Your agent hands it a bill in any format and pays with whatever coin it holds. The other side receives exactly what it asked for. No agent wallet? You approve each payment with one tap on your phone. Swap Ripper never holds the money.
 
 ## Connect in 10 seconds
 
@@ -68,6 +68,10 @@ Owners set a max per payment, max per day, and allowed chains or recipients ([/l
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/swapripper/swap-ripper/main/assets/flow.png" alt="How a payment flows: your agent pays with any token, Swap Ripper reads the bill, checks limits and picks the cheaper network, and the recipient gets the exact amount" width="100%">
+</p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/swapripper/swap-ripper/main/assets/approve.png" alt="No agent wallet? Approve with one tap: every payment includes a signed wallet link with a QR code and an Open in wallet button" width="100%">
 </p>
 
 <p align="center">
@@ -229,7 +233,8 @@ Create a policy at [/limits](https://swap-ripper.szydlow45.workers.dev/limits) o
 - **Max $1,000 per payment** while the service is new.
 - **Referrals:** pass `referrer: "yourname.near"` and earn one third of the fee on every payment you route, paid on-chain. Users pay the same price.
 - **Non-custodial:** one-time deposit addresses and address checks before any deposit address is issued. If a swap can't complete, the solver network refunds automatically. Funds sent to a wrong address can't be recovered.
-- Not available to sanctioned persons or in sanctioned jurisdictions. Provided as-is. Always double-check addresses.
+- **Sanctions screening:** addresses on the U.S. Treasury (OFAC) sanctions list are refused for payments, refunds, invoices and paywalls. Sanctioned regions are blocked.
+- Provided as-is. Always double-check addresses.
 - By using Swap Ripper you agree to the [Terms of Service](https://swap-ripper.szydlow45.workers.dev/terms).
 
 ## Self-host
