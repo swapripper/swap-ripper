@@ -8,6 +8,12 @@ No API key. No sign-up. No wallet connection. Non-custodial, with automatic refu
 https://swap-ripper.szydlow45.workers.dev/mcp
 ```
 
+## Built for builders
+
+- **Test mode**: add `test: true` to any payment (or create a test invoice) and get a fake deposit address that completes by itself in ~15 seconds. Status, invoices, receipts, webhooks and spending limits all work, with no real money. Test payments can never pay a real invoice.
+- **No double payments**: pass your own `request_id` on payments. Retrying with the same ID returns the same payment instructions instead of creating a second payment.
+- **Lite connection**: `https://swap-ripper.szydlow45.workers.dev/mcp/lite` exposes only the 6 essentials (pay, get_quote, create_payment_link, check_payment, get_swap_status, get_receipt) to keep your agent's context small. The full `/mcp` keeps every tool.
+
 ## Spending limits owners can trust
 
 Owners create a policy (max per payment, max per day, optional allowed chains, tokens and recipients) at **[/limits](https://swap-ripper.szydlow45.workers.dev/limits)** or with `create_spending_policy`, then give their agent a **policy-locked URL** (`/mcp/p/<policy_id>`). Every swap and payment through it is checked first and refused if it breaks a rule, before any payment instructions exist. The private admin key shows the spending log and works as an instant off switch (`set_policy_enabled`). Swap Ripper never holds funds.

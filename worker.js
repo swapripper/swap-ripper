@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "2.2.0";
+const VERSION = "2.3.0";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -46,6 +46,7 @@ const DESCRIPTION =
   "from any chain, pay exact amounts, gas refuel, and 'pay me in any crypto' links.";
 
 const INSTRUCTIONS =
+  "Always pass a unique request_id on payments so retries never pay twice. Add test=true to try any flow without real money. " +
   "Owners can cap an agent's spending with create_spending_policy (policy-locked URL, daily limits, kill switch). " +
   "Selling something? create_payment_link gives you an invoice; check_payment tells you when it's paid; get_receipt gives signed proof. " +
   "Need to pay something? Pass ANY payment request (link, URI, 402 invoice, or plain text) to the pay tool. " +
@@ -543,6 +544,51 @@ function depositReply(c, a, src, dst, qq, recipient, refund) {
 // Smart routing: quote NEAR Intents and Relay at once, use whichever is cheaper for the agent;
 // if one network fails, the other takes over. speed='fast' forces Relay.
 async function routeSwap(c, a, src, dst, units, recipient, refund, usd, exactOutput) {
+  // No double payments: the same request_id returns the same payment instructions for 1 hour.
+  let idemKey = null, idemFp = null;
+  if (a.request_id != null && a.request_id !== "") {
+    const rid = String(a.request_id);
+    if (rid.length > 100) throw new UserError("request_id is too long (max 100 characters)");
+    if (c.kv) {
+      idemFp = JSON.stringify([src.assetId, dst.assetId, units, recipient, refund, !!exactOutput, String(a.speed || ""), !!a.test, a.policy_id || ""]);
+      idemKey = `idem:${await sha256hex(rid + "|" + (a.policy_id || ""))}`;
+      const prev = await c.kv.get(idemKey);
+      if (prev) {
+        const { fp, out } = JSON.parse(prev);
+        if (fp !== idemFp) throw new UserError("This request_id was already used for a different payment. Use a new request_id for a new payment.");
+        return { ...out, idempotent_replay: true, note_replay: "Same request_id as before: these are the SAME payment instructions. Don't pay twice." };
+      }
+    }
+  }
+  const out = await routeSwapInner(c, a, src, dst, units, recipient, refund, usd, exactOutput);
+  if (idemKey) { try { await c.kv.put(idemKey, JSON.stringify({ fp: idemFp, out }), { expirationTtl: 3600 }); } catch { /* ignore */ } }
+  return out;
+}
+
+// Test mode: realistic numbers from live prices, a fake deposit address that "completes" by itself in ~15s.
+function testQuote(c, src, dst, units, exactOutput, bps) {
+  const ps = Number(src.price || 0), pd = Number(dst.price || 0);
+  if (!ps || !pd) throw new UserError("test mode needs prices for both tokens; try a major token");
+  const feeMul = 1 + bps / 10000 + 0.003; // service fee + typical network cost
+  let amountIn, amountOut;
+  if (exactOutput) { amountOut = Number(fmtUnits(units, dst.decimals)); amountIn = (amountOut * pd / ps) * feeMul; }
+  else { amountIn = Number(fmtUnits(units, src.decimals)); amountOut = (amountIn * ps / pd) / feeMul; }
+  const dp = (n, d) => n.toFixed(Math.min(d, 8)).replace(/0+$/, "").replace(/\.$/, "");
+  const dep = `test_${Date.now().toString(36)}_${randId("", 10)}`;
+  return { depositAddress: dep, amountInFormatted: dp(amountIn, src.decimals), amountIn: toUnits(dp(amountIn, src.decimals), src.decimals),
+    amountOutFormatted: dp(amountOut, dst.decimals), amountInUsd: +(amountIn * ps).toFixed(2), amountOutUsd: +(amountOut * pd).toFixed(2),
+    deadline: new Date(Date.now() + 3600e3).toISOString(), timeEstimate: 15 };
+}
+const TEST_DEP = /^test_([0-9a-z]+)_[a-z0-9]{10}$/;
+function testStatus(dep) {
+  const m = String(dep).match(TEST_DEP);
+  const age = (Date.now() - parseInt(m[1], 36)) / 1000;
+  const st = age < 5 ? "PENDING_DEPOSIT" : age < 15 ? "PROCESSING" : "SUCCESS";
+  return { status: st, final: st === "SUCCESS", test: true, meaning: STATUS_TEXT[st] + " (TEST MODE: no real funds)",
+    amount_in: null, amount_out: null, origin_tx: st === "SUCCESS" ? ["test-origin-tx"] : [], destination_tx: st === "SUCCESS" ? ["test-destination-tx"] : [] };
+}
+
+async function routeSwapInner(c, a, src, dst, units, recipient, refund, usd, exactOutput) {
   const pol = await enforcePolicy(c, a, src, dst, recipient, Number(usd) || 0);
   const slip = clampSlip(a.slippage_bps);
   const bps = effectiveBps(c, usd);
@@ -555,7 +601,13 @@ async function routeSwap(c, a, src, dst, units, recipient, refund, usd, exactOut
   const fastP = () => fastSwap(c, a, src, dst, units, recipient, refund, exactOutput, bps);
   const finish = async (kind, q, choice) => {
     let out;
-    if (kind === "fast") {
+    if (kind === "test") {
+      track(c, "test_swaps");
+      out = depositReply(c, a, src, dst, q, recipient, refund); out.route = "test"; out.test = true;
+      out.test_mode = "TEST MODE: nothing to send. This fake deposit 'completes' by itself in ~15s so you can test status, invoices, receipts and webhooks for free.";
+      out.next_steps = ["Don't send anything: this is a test. Call get_swap_status with this deposit_address (wait_seconds=20) and watch it complete."];
+      out.deposit_tx = null;
+    } else if (kind === "fast") {
       await recordSwap(c, null, Number(q.amountInUsd) || usd); track(c, "fast_swaps");
       out = fastReply(c, a, src, dst, q, recipient, refund);
     } else {
@@ -563,12 +615,13 @@ async function routeSwap(c, a, src, dst, units, recipient, refund, usd, exactOut
       out = depositReply(c, a, src, dst, q, recipient, refund); out.route = "best_price";
     }
     if (choice) out.route_choice = choice;
-    await recordPolicySpend(c, pol, Number(usd) || 0, out);
-    await rememberDeposit(c, out, { exactOutput, exactText: exactOutput ? `${fmtUnits(units, dst.decimals)} ${dst.symbol} on ${dst.blockchain}` : null, invoice: a.invoice || null });
+    await recordPolicySpend(c, pol, Number(usd) || 0, out, !!a.test);
+    await rememberDeposit(c, out, { test: !!a.test, exactOutput, exactText: exactOutput ? `${fmtUnits(units, dst.decimals)} ${dst.symbol} on ${dst.blockchain}` : null, invoice: a.invoice || null });
     if (a.invoice) out.invoice_id = a.invoice;
     out.receipt_hint = "After it completes, get_receipt with this deposit_address returns a signed, verifiable receipt.";
     return out;
   };
+  if (a.test) return finish("test", testQuote(c, src, dst, units, exactOutput, bps));
   if (speed === "fast") return finish("fast", await fastP());
   const canFast = fastEnabled(c) && relayCurrency(src) && relayCurrency(dst);
   if (!canFast) return finish("near", await nearP());
@@ -635,7 +688,7 @@ async function refuelGas(c, a) {
   const amt = (usd / Number(native.price)).toFixed(Math.min(native.decimals, 8)).replace(/0+$/, "").replace(/\.$/, "");
   const out = await payExact(c, { token: sym, chain, amount_out: amt, pay_with_token: a.pay_with_token,
     pay_with_chain: a.pay_with_chain, recipient: a.recipient, refund_address: a.refund_address,
-    slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed, policy_id: a.policy_id });
+    slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed, policy_id: a.policy_id, test: a.test, request_id: a.request_id });
   out.gas = { chain, token: sym, amount: amt, approx_usd: usd };
   return out;
 }
@@ -736,7 +789,7 @@ async function fundX402(c, a) {
   }
   const out = await payExact(c, { token: tok.assetId, amount_out: target_str, pay_with_token: a.pay_with_token,
     pay_with_chain: a.pay_with_chain, recipient: a.wallet, refund_address: a.refund_address,
-    slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed, policy_id: a.policy_id });
+    slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed, policy_id: a.policy_id, test: a.test, request_id: a.request_id });
   track(c, "x402_funds");
   out.invoice = invoice;
   out.why = why;
@@ -791,7 +844,7 @@ async function parsePaymentRequest(c, req) {
     let u; try { u = new URL(r); } catch { throw new UserError("That link isn't a valid URL."); }
     const q = u.searchParams;
     if (u.pathname.replace(/\/$/, "").endsWith("/pay") && q.get("to")) {
-      return { kind: "payment_link", to: q.get("to"), token: q.get("token"), chain: q.get("chain"), amount: q.get("amount"), label: q.get("label"), invoice: q.get("inv") };
+      return { kind: "payment_link", to: q.get("to"), token: q.get("token"), chain: q.get("chain"), amount: q.get("amount"), label: q.get("label"), invoice: q.get("inv"), test: q.get("test") === "1" };
     }
     throw new UserError("This link isn't a payment request I recognize. Supported: Swap Ripper /pay links, solana:, ethereum:, bitcoin: URIs, x402 invoices, or plain text.");
   }
@@ -866,6 +919,7 @@ async function payAnything(c, a) {
   }
   const out = await payExact(c, { token: dst.assetId, amount_out: amount, pay_with_token: src.assetId, recipient: to,
     refund_address: a.refund_address, slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed, policy_id: a.policy_id,
+    test: !!(a.test || p.test), request_id: a.request_id,
     invoice: p.invoice && INV_ID.test(p.invoice) ? p.invoice : undefined });
   track(c, "pay_requests");
   return { understood, ...out };
@@ -905,6 +959,7 @@ async function createSpendingPolicy(c, a) {
   return {
     policy_id: id,
     agent_mcp_url: `${c.origin}/mcp/p/${id}`,
+    agent_mcp_url_lite: `${c.origin}/mcp/p/${id}/lite`,
     agent_rest_base: `${c.origin}/api/p/${id}/`,
     admin_key: adminKey,
     limits: publicPolicy(pol),
@@ -936,14 +991,14 @@ async function enforcePolicy(c, a, src, dst, recipient, usd) {
     const r = String(recipient), ok = p.allowed_recipients.some((x) => (/^0x/i.test(x) ? x.toLowerCase() === r.toLowerCase() : x === r));
     if (!ok) no("this recipient isn't on the approved list.");
   }
-  const spent = Number((await c.kv.get(`pspend:${p.id}:${today()}`)) || 0);
+  const spent = Number((await c.kv.get(`${a.test ? "pspendtest" : "pspend"}:${p.id}:${today()}`)) || 0);
   if (spent + usd > p.max_per_day_usd) no(`today's total would be ~$${(spent + usd).toFixed(2)}, over the $${p.max_per_day_usd} daily limit ($${Math.max(p.max_per_day_usd - spent, 0).toFixed(2)} left today).`);
   return { p, spent };
 }
-async function recordPolicySpend(c, pol, usd, out) {
+async function recordPolicySpend(c, pol, usd, out, isTest = false) {
   if (!pol) return;
   try {
-    const key = `pspend:${pol.p.id}:${today()}`;
+    const key = `${isTest ? "pspendtest" : "pspend"}:${pol.p.id}:${today()}`;
     const spent = Number((await c.kv.get(key)) || 0) + usd;
     await c.kv.put(key, String(+spent.toFixed(2)), { expirationTtl: 3 * 86400 });
     const lk = `plog:${pol.p.id}`;
@@ -986,7 +1041,7 @@ async function rememberDeposit(c, out, extra) {
   const rec = { deposit_address: out.deposit_address, deposit_memo: out.deposit_memo || null, route: out.route || "best_price",
     created_at: new Date().toISOString(), send: { amount: out.send_exactly, token: out.send_token }, receive: { estimated: out.estimated_amount_out,
     exact: extra.exactOutput ? (extra.exactText || out.recipient_receives_exactly || null) : null, token: out.receive_token }, recipient: out.recipient,
-    refund_address: out.refund_address, fee_bps: out.fees && out.fees.service_fee_bps, invoice: extra.invoice };
+    refund_address: out.refund_address, fee_bps: out.fees && out.fees.service_fee_bps, invoice: extra.invoice, test: !!extra.test };
   try {
     await c.kv.put(`dep:${out.deposit_address}`, JSON.stringify(rec), { expirationTtl: DEP_TTL });
     if (extra.invoice && INV_ID.test(extra.invoice)) {
@@ -1003,6 +1058,7 @@ async function rememberDeposit(c, out, extra) {
 // and (if the invoice has an amount) exactly that amount.
 function depositMatchesInvoice(rec, v) {
   if (!rec || !v || !rec.receive || !rec.receive.token) return false;
+  if (!!rec.test !== !!v.test) return false; // test payments never pay real invoices (and vice versa)
   const sameAddr = (x, y) => (/^0x/i.test(String(x)) ? String(x).toLowerCase() === String(y).toLowerCase() : String(x) === String(y));
   if (!sameAddr(rec.recipient, v.to)) return false;
   if (String(rec.receive.token.symbol).toUpperCase() !== String(v.token).toUpperCase() || rec.receive.token.chain !== v.chain) return false;
@@ -1065,6 +1121,7 @@ async function getReceipt(c, a) {
     origin_tx: (st.origin_tx || []).join(" "), destination_tx: (st.destination_tx || []).join(" "),
     service_fee_bps: (rec && rec.fee_bps) ?? null, created_at: (rec && rec.created_at) || null, issued_at: new Date().toISOString(),
   };
+  if (TEST_DEP.test(dep)) receipt.test = true;
   const signature = await hmacHex(c.receiptSecret, canon(receipt));
   return { receipt, signature, verify: `POST ${c.origin}/api/verify with {"receipt": <receipt>, "signature": "<signature>"} to confirm it is genuine and unchanged.` };
 }
@@ -1097,7 +1154,7 @@ async function notifyPaid(c, id, v, result) {
   if (!paid) return;
   let receipt = null;
   try { receipt = await getReceipt(c, { deposit_address: paid.deposit_address }); } catch { /* still notify */ }
-  const body = JSON.stringify({ event: "invoice.paid", invoice_id: id, invoice: result.invoice, payment: paid,
+  const body = JSON.stringify({ event: "invoice.paid", test: !!v.test, invoice_id: id, invoice: result.invoice, payment: paid,
     receipt: receipt && receipt.receipt, receipt_signature: receipt && receipt.signature, sent_at: new Date().toISOString() });
   const sig = await hmacWithKey(v.webhook_secret, body);
   let ok = false, code = 0;
@@ -1131,6 +1188,7 @@ async function createPaymentLink(c, a) {
   const to = checkAddress(a.recipient, dst.blockchain, "recipient");
   if (a.amount !== undefined && a.amount !== null && a.amount !== "") toUnits(a.amount, dst.decimals);
   const p = new URLSearchParams({ to, token: dst.symbol, chain: dst.blockchain });
+  if (a.test) p.set("test", "1");
   if (a.amount) p.set("amount", String(a.amount));
   if (a.label) p.set("label", String(a.label).slice(0, 80));
   const ref = a.referrer ? cleanReferrer(c, a.referrer) : null;
@@ -1144,7 +1202,7 @@ async function createPaymentLink(c, a) {
     try {
       await c.kv.put(`inv:${invoice_id}`, JSON.stringify({ to, token: dst.symbol, chain: dst.blockchain, amount: a.amount || null,
         label: a.label ? String(a.label).slice(0, 80) : null, created_at: new Date().toISOString(), link: `${c.origin}/pay?${p}`, deposits: [],
-        webhook, webhook_secret }), { expirationTtl: INV_TTL });
+        webhook, webhook_secret, test: !!a.test }), { expirationTtl: INV_TTL });
       if (webhook) await c.kv.put(`hook:${invoice_id}`, "1", { expirationTtl: 30 * 86400 });
     } catch { invoice_id = null; webhook_secret = null; p.delete("inv"); }
   }
@@ -1280,6 +1338,13 @@ async function swapStatus(c, a) {
 }
 
 async function fetchStatus(c, a) {
+  if (TEST_DEP.test(String(a.deposit_address || ""))) {
+    const st = testStatus(a.deposit_address);
+    if (st.status === "SUCCESS" && c.kv) {
+      try { const rec = JSON.parse((await c.kv.get(`dep:${a.deposit_address}`)) || "null"); if (rec) { st.amount_in = rec.send && rec.send.amount; st.amount_out = rec.receive && (rec.receive.exact ? String(rec.receive.exact).split(" ")[0] : rec.receive.estimated); } } catch { /* ignore */ }
+    }
+    return st;
+  }
   if (String(a.route || "").toLowerCase() === "fast") return fetchFastStatus(c, a);
   if (!a.route && fastEnabled(c)) {
     try { return await fetchNearStatus(c, a); }
@@ -1339,6 +1404,8 @@ function fmtUnits(units, decimals) {
 
 // ------------------------------------------------------------------ MCP tool definitions
 const REFERRER = { type: "string", description: "Optional: your NEAR account (e.g. 'myagent.near'). You earn 1/3 of the service fee on every swap routed with it. The user pays the same." };
+const TEST = { type: "boolean", description: "Test mode: true = no real money. You get a fake deposit address that completes by itself in ~15s, so you can test status, invoices, receipts and webhooks for free." };
+const REQUEST_ID = { type: "string", description: "Recommended: your own unique ID for this payment (e.g. a UUID). Retrying with the same request_id returns the SAME payment instructions, so you never pay twice." };
 const SPEED = { type: "string", enum: ["best_price", "fast"], description: "Optional. Default 'best_price': Swap Ripper quotes two networks at once and uses whichever is cheaper for you (and the other if one fails); the reply's route_choice shows both. 'fast' forces the ~seconds Relay route." };
 const TOKEN_PROPS = {
   from_token: { type: "string", description: "Token to send: symbol ('USDC', 'ETH', 'BTC'), 'SYMBOL@chain', 'SYMBOL on chain', or an asset_id from search_tokens." },
@@ -1367,6 +1434,8 @@ const TOOLS = [
       refund_address: { type: "string", description: "Your address on the paying chain, for automatic refunds." },
       wallet: { type: "string", description: "x402 only: YOUR address on the invoice's network (your x402 client signs from it)." },
       speed: SPEED,
+      request_id: REQUEST_ID,
+      test: TEST,
       slippage_bps: TOKEN_PROPS.slippage_bps,
       referrer: REFERRER,
     } },
@@ -1389,7 +1458,7 @@ const TOOLS = [
     name: "create_swap",
     title: "Swap tokens across chains",
     description: "Lock a quote and get a one-time deposit address. Send exactly `send_exactly` of the source token there and the output lands at `recipient` automatically, usually in under a minute. Non-custodial, no API key, no wallet connection, automatic refund on failure. For EVM sources, `deposit_tx` is a ready-to-sign transaction.",
-    inputSchema: { type: "object", required: ["from_token", "to_token", "amount", "recipient", "refund_address"], properties: { ...TOKEN_PROPS, ...ADDR_PROPS, speed: SPEED } },
+    inputSchema: { type: "object", required: ["from_token", "to_token", "amount", "recipient", "refund_address"], properties: { ...TOKEN_PROPS, ...ADDR_PROPS, speed: SPEED, request_id: REQUEST_ID, test: TEST } },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     run: createSwap,
   },
@@ -1406,6 +1475,8 @@ const TOOLS = [
       slippage_bps: TOKEN_PROPS.slippage_bps,
       ...ADDR_PROPS,
       speed: SPEED,
+      request_id: REQUEST_ID,
+      test: TEST,
       referrer: REFERRER,
     } },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -1425,6 +1496,10 @@ const TOOLS = [
       prefer_network: { type: "string", description: "Optional: which of the invoice's networks to fund, e.g. 'base' or 'solana'." },
       slippage_bps: TOKEN_PROPS.slippage_bps,
       speed: SPEED,
+      request_id: REQUEST_ID,
+      test: TEST,
+      request_id: REQUEST_ID,
+      test: TEST,
       referrer: REFERRER,
     } },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -1440,6 +1515,7 @@ const TOOLS = [
       amount: { type: "string", description: "Optional fixed amount, e.g. '50'. Leave empty to let the payer choose." },
       recipient: { type: "string", description: "Your address on that chain." },
       label: { type: "string", description: "Optional note shown to the payer, e.g. 'Invoice #12' (max 80 chars)." },
+      test: { type: "boolean", description: "Test invoice: only test-mode payments count toward it (great for building and testing your flow for free)." },
       webhook_url: { type: "string", description: "Optional https URL. When the invoice is paid, Swap Ripper POSTs a signed notification (with the receipt) to it, so you don't have to poll." },
       referrer: REFERRER,
     } },
@@ -1528,6 +1604,10 @@ const TOOLS = [
       refund_address: { type: "string", description: "Your address on the paying chain, for automatic refunds." },
       slippage_bps: TOKEN_PROPS.slippage_bps,
       speed: SPEED,
+      request_id: REQUEST_ID,
+      test: TEST,
+      request_id: REQUEST_ID,
+      test: TEST,
       referrer: REFERRER,
     } },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -1613,7 +1693,8 @@ const TOOLS = [
 ];
 const POLICY_LOCKED_BLOCK = new Set(["create_spending_policy", "set_policy_enabled"]);
 const TOOL_MAP = Object.fromEntries(TOOLS.map((t) => [t.name, t]));
-const publicTools = () => TOOLS.map(({ run, ...t }) => t);
+const LITE = ["pay", "get_quote", "create_payment_link", "check_payment", "get_swap_status", "get_receipt"];
+const publicTools = (c) => TOOLS.filter((t) => !(c && c.lite) || LITE.includes(t.name)).map(({ run, ...t }) => t);
 
 // ------------------------------------------------------------------ MCP JSON-RPC
 async function handleRpc(msg, c) {
@@ -1637,7 +1718,7 @@ async function handleRpc(msg, c) {
     case "ping":
       return ok({});
     case "tools/list":
-      return ok({ tools: publicTools() });
+      return ok({ tools: publicTools(c) });
     case "tools/call": {
       const tool = TOOL_MAP[params.name];
       if (!tool) return err(-32602, `Unknown tool: ${params.name}`);
@@ -1810,7 +1891,7 @@ table{border-collapse:collapse;width:100%}td{padding:6px 8px;border-top:1px soli
 <h1>⚡ Swap Ripper</h1><p class="sub">Cross-chain swaps for AI agents, in one tool call.</p>
 <p>${DESCRIPTION}</p>
 <p><span class="tag">MCP</span><span class="tag">REST + OpenAPI</span><span class="tag">A2A card</span><span class="tag">No API key</span><span class="tag">Non-custodial</span><span class="tag">Auto-refund</span><span class="tag">${c.feeBps / 100}% fee, lower for big swaps</span><span class="tag">Referral rewards</span></p>
-<h2>Connect in 10 seconds</h2><pre>${origin}/mcp</pre>
+<h2>Connect in 10 seconds</h2><pre>${origin}/mcp</pre><p>Want fewer tools in your agent's context? Use <code>${origin}/mcp/lite</code> (the 6 essentials). Building? Add <code>test: true</code> to any payment for a free sandbox run, and <code>request_id</code> so retries never pay twice.</p>
 <pre>{ "mcpServers": { "swap-ripper": { "url": "${origin}/mcp" } } }</pre>
 <h2>What agents can do</h2><table>${TOOLS.map((t) => `<tr><td><code>${t.name}</code></td><td>${t.description}</td></tr>`).join("")}</table>
 <h2>Spending limits owners can trust</h2><p>Owners set limits (per payment, per day, chains, tokens, recipients) and give their agent a policy-locked URL. Anything over the limits is refused before payment instructions exist, with a spending log and an instant off switch. <a href="/limits"><b>Set limits for your agent →</b></a></p>
@@ -1998,10 +2079,11 @@ export default {
       if (pm) {
         try { await loadPolicy(c, pm[2]); } catch (e) { return json({ error: e.message }, 404); }
         c.policyId = pm[2];
-        if (pm[1] === "mcp") return await handleMcp(request, c);
+        if (pm[1] === "mcp") { if (pm[3] === "/lite") c.lite = true; return await handleMcp(request, c); }
         const u2 = new URL(url); u2.pathname = "/api" + (pm[3] || "/");
         return await handleRest(request, u2, c);
       }
+      if (path === "/mcp/lite") { c.lite = true; return await handleMcp(request, c); }
       if (path === "/mcp" || (path === "/" && request.method === "POST")) return await handleMcp(request, c);
       if (path.startsWith("/api")) return await handleRest(request, url, c);
       if (path === "/openapi.json") { track(c, "view:openapi"); return json(openapi(origin)); }
