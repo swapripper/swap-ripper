@@ -8,6 +8,12 @@ No API key. No sign-up. No wallet connection. Non-custodial, with automatic refu
 https://swap-ripper.szydlow45.workers.dev/mcp
 ```
 
+## Get paid, with proof
+
+- `create_payment_link` now returns an **invoice_id**. The payer can use any token on any chain; you receive exactly what you asked for.
+- `check_payment` tells you whether the invoice is **unpaid, processing or paid**, with blockchain transaction hashes. Deliver your service only after it's paid. Payments only count if they pay the right recipient, token, chain and full amount.
+- `get_receipt` issues a **signed receipt** for any completed swap or payment. `verify_receipt` (or `POST /api/verify`) lets anyone confirm it's genuine and unchanged.
+
 ## New: pay anything
 
 Hand the `pay` tool **any** payment request and it pays it exactly, using whatever token you hold on any chain:
@@ -107,6 +113,8 @@ curl -s -X POST https://swap-ripper.szydlow45.workers.dev/api/x402 -H 'content-t
 | Tool | What it does |
 |---|---|
 | `pay` | **Pay anything**: x402 invoices, Solana Pay, EIP-681, Bitcoin links, payment links or plain text, paid with any token. |
+| `check_payment` | Did I get paid? Invoice status with transaction proof. |
+| `get_receipt` / `verify_receipt` | Signed receipts anyone can verify. |
 | `fund_x402` | **Hit a 402 paywall?** Decode the x402 invoice and fund your wallet on the right chain from any chain. |
 | `get_quote` | Live cross-chain price, no addresses needed. Includes a **fair-price check** vs market rates. |
 | `quote_from_text` | Plain English: `"25 USDC on solana to ETH on base"` |

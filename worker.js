@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "1.9.0";
+const VERSION = "2.0.0";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -46,6 +46,7 @@ const DESCRIPTION =
   "from any chain, pay exact amounts, gas refuel, and 'pay me in any crypto' links.";
 
 const INSTRUCTIONS =
+  "Selling something? create_payment_link gives you an invoice; check_payment tells you when it's paid; get_receipt gives signed proof. " +
   "Need to pay something? Pass ANY payment request (link, URI, 402 invoice, or plain text) to the pay tool. " +
   "Got an HTTP 402 / x402 'Payment Required' but your funds are on another chain? Pass the 402 response to fund_x402. " +
   "Tip: add referrer='<your NEAR account>' to any call to earn 1/3 of the fee on swaps you route. " +
@@ -82,6 +83,7 @@ function cfg(env) {
     kv: env.STATS || null, // optional Workers KV binding for referral stats
     relayKey: String(env.RELAY_API_KEY || "").trim(),
     relayFeeTo: String(env.RELAY_FEE_TO || "").trim().toLowerCase(),
+    receiptSecret: String(env.RECEIPT_SECRET || env.ONECLICK_JWT || "swap-ripper"),
     origin: "",
   };
 }
@@ -550,12 +552,19 @@ async function routeSwap(c, a, src, dst, units, recipient, refund, usd, exactOut
       if (exactOutput && !qq.amountInFormatted) throw new UserError("the swap network did not return payment instructions; try again"); return qq; });
   const fastP = () => fastSwap(c, a, src, dst, units, recipient, refund, exactOutput, bps);
   const finish = async (kind, q, choice) => {
+    let out;
     if (kind === "fast") {
       await recordSwap(c, null, Number(q.amountInUsd) || usd); track(c, "fast_swaps");
-      const out = fastReply(c, a, src, dst, q, recipient, refund); if (choice) out.route_choice = choice; return out;
+      out = fastReply(c, a, src, dst, q, recipient, refund);
+    } else {
+      await recordSwap(c, a.referrer, Number(q.amountInUsd) || usd);
+      out = depositReply(c, a, src, dst, q, recipient, refund); out.route = "best_price";
     }
-    await recordSwap(c, a.referrer, Number(q.amountInUsd) || usd);
-    const out = depositReply(c, a, src, dst, q, recipient, refund); out.route = "best_price"; if (choice) out.route_choice = choice; return out;
+    if (choice) out.route_choice = choice;
+    await rememberDeposit(c, out, { exactOutput, exactText: exactOutput ? `${fmtUnits(units, dst.decimals)} ${dst.symbol} on ${dst.blockchain}` : null, invoice: a.invoice || null });
+    if (a.invoice) out.invoice_id = a.invoice;
+    out.receipt_hint = "After it completes, get_receipt with this deposit_address returns a signed, verifiable receipt.";
+    return out;
   };
   if (speed === "fast") return finish("fast", await fastP());
   const canFast = fastEnabled(c) && relayCurrency(src) && relayCurrency(dst);
@@ -779,7 +788,7 @@ async function parsePaymentRequest(c, req) {
     let u; try { u = new URL(r); } catch { throw new UserError("That link isn't a valid URL."); }
     const q = u.searchParams;
     if (u.pathname.replace(/\/$/, "").endsWith("/pay") && q.get("to")) {
-      return { kind: "payment_link", to: q.get("to"), token: q.get("token"), chain: q.get("chain"), amount: q.get("amount"), label: q.get("label") };
+      return { kind: "payment_link", to: q.get("to"), token: q.get("token"), chain: q.get("chain"), amount: q.get("amount"), label: q.get("label"), invoice: q.get("inv") };
     }
     throw new UserError("This link isn't a payment request I recognize. Supported: Swap Ripper /pay links, solana:, ethereum:, bitcoin: URIs, x402 invoices, or plain text.");
   }
@@ -852,9 +861,107 @@ async function payAnything(c, a) {
     return { understood, no_swap_needed: true, message: `You already hold ${dst.symbol} on ${dst.blockchain}. Send ${amount} ${dst.symbol} to ${to} directly: no swap, no fee.` };
   }
   const out = await payExact(c, { token: dst.assetId, amount_out: amount, pay_with_token: src.assetId, recipient: to,
-    refund_address: a.refund_address, slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed });
+    refund_address: a.refund_address, slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed,
+    invoice: p.invoice && INV_ID.test(p.invoice) ? p.invoice : undefined });
   track(c, "pay_requests");
   return { understood, ...out };
+}
+
+// ---- Invoices, payment checks and signed receipts
+const INV_TTL = 60 * 60 * 24 * 180, DEP_TTL = 60 * 60 * 24 * 120;
+const INV_ID = /^inv_[a-z0-9]{12}$/;
+function newInvoiceId() {
+  const b = crypto.getRandomValues(new Uint8Array(12));
+  return "inv_" + Array.from(b, (x) => "abcdefghijkmnpqrstuvwxyz23456789"[x % 32]).join("");
+}
+async function rememberDeposit(c, out, extra) {
+  if (!c.kv || !out.deposit_address) return;
+  const rec = { deposit_address: out.deposit_address, deposit_memo: out.deposit_memo || null, route: out.route || "best_price",
+    created_at: new Date().toISOString(), send: { amount: out.send_exactly, token: out.send_token }, receive: { estimated: out.estimated_amount_out,
+    exact: extra.exactOutput ? (extra.exactText || out.recipient_receives_exactly || null) : null, token: out.receive_token }, recipient: out.recipient,
+    refund_address: out.refund_address, fee_bps: out.fees && out.fees.service_fee_bps, invoice: extra.invoice };
+  try {
+    await c.kv.put(`dep:${out.deposit_address}`, JSON.stringify(rec), { expirationTtl: DEP_TTL });
+    if (extra.invoice && INV_ID.test(extra.invoice)) {
+      const raw = await c.kv.get(`inv:${extra.invoice}`);
+      if (raw) { const v = JSON.parse(raw);
+        if (depositMatchesInvoice(rec, v)) {
+          v.deposits = [out.deposit_address, ...(v.deposits || [])].slice(0, 20);
+          await c.kv.put(`inv:${extra.invoice}`, JSON.stringify(v), { expirationTtl: INV_TTL });
+        } }
+    }
+  } catch { /* bookkeeping must never break payments */ }
+}
+// A payment only counts toward an invoice if it pays the invoice's recipient, in its token and chain,
+// and (if the invoice has an amount) exactly that amount.
+function depositMatchesInvoice(rec, v) {
+  if (!rec || !v || !rec.receive || !rec.receive.token) return false;
+  const sameAddr = (x, y) => (/^0x/i.test(String(x)) ? String(x).toLowerCase() === String(y).toLowerCase() : String(x) === String(y));
+  if (!sameAddr(rec.recipient, v.to)) return false;
+  if (String(rec.receive.token.symbol).toUpperCase() !== String(v.token).toUpperCase() || rec.receive.token.chain !== v.chain) return false;
+  if (v.amount) {
+    if (!rec.receive.exact) return false;
+    const got = Number(String(rec.receive.exact).split(" ")[0]);
+    if (!(got >= Number(v.amount))) return false;
+  }
+  return true;
+}
+async function hmacHex(secret, msg) {
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode("receipt:" + secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(msg));
+  return Array.from(new Uint8Array(sig), (x) => x.toString(16).padStart(2, "0")).join("");
+}
+const canon = (o) => JSON.stringify(o, Object.keys(o).sort());
+async function checkPayment(c, a) {
+  const id = String(a.invoice_id || "").trim();
+  if (!INV_ID.test(id)) throw new UserError("invoice_id looks wrong. It starts with 'inv_' and comes from create_payment_link.");
+  if (!c.kv) throw new UserError("invoice tracking is unavailable right now");
+  const raw = await c.kv.get(`inv:${id}`);
+  if (!raw) throw new UserError("invoice not found (it may have expired after 180 days)");
+  const v = JSON.parse(raw);
+  const payments = [];
+  for (const dep of (v.deposits || []).slice(0, 10)) {
+    let rec = null; try { rec = JSON.parse((await c.kv.get(`dep:${dep}`)) || "null"); } catch { rec = null; }
+    if (!depositMatchesInvoice(rec, v)) continue;
+    try { const st = await fetchStatus(c, { deposit_address: dep, deposit_memo: rec.deposit_memo || undefined, route: rec.route === "fast" ? "fast" : undefined }); payments.push({ deposit_address: dep, status: st.status, final: st.final, amount_out: st.amount_out ?? null, destination_tx: st.destination_tx || [] }); }
+    catch { payments.push({ deposit_address: dep, status: "UNKNOWN" }); }
+  }
+  const paid = payments.find((p) => p.status === "SUCCESS");
+  const processing = payments.find((p) => ["PROCESSING", "KNOWN_DEPOSIT_TX"].includes(p.status));
+  const status = paid ? "paid" : processing ? "processing" : "unpaid";
+  return {
+    invoice_id: id, status, paid: !!paid,
+    invoice: { to: v.to, token: v.token, chain: v.chain, amount: v.amount || null, label: v.label || null, created_at: v.created_at, payment_link: v.link },
+    payments,
+    receipt_hint: paid ? `get_receipt with deposit_address=${paid.deposit_address} returns a signed receipt.` : undefined,
+    note: "Tracks payments made through this invoice's Swap Ripper link or the pay tool. A payer who sends the token directly (no swap) won't show here; check the recipient wallet for those.",
+  };
+}
+async function getReceipt(c, a) {
+  const dep = String(a.deposit_address || "").trim();
+  if (!dep) throw new UserError("deposit_address is required");
+  let rec = null;
+  if (c.kv) { try { rec = JSON.parse((await c.kv.get(`dep:${dep}`)) || "null"); } catch { rec = null; } }
+  const st = await fetchStatus(c, { deposit_address: dep, deposit_memo: a.deposit_memo || (rec && rec.deposit_memo) || undefined, route: rec && rec.route === "fast" ? "fast" : undefined });
+  if (st.status !== "SUCCESS") return { deposit_address: dep, status: st.status, final: st.final, message: st.final ? "This payment didn't complete, so there is no receipt. See status for details." : "Not complete yet. Receipts are issued once status is SUCCESS. Try get_swap_status with wait_seconds=25." };
+  const receipt = {
+    issuer: "Swap Ripper", version: 1, deposit_address: dep, route: (rec && rec.route) || st.route || "best_price", status: "SUCCESS",
+    paid_amount: st.amount_in ?? (rec && rec.send && rec.send.amount) ?? null, paid_token: rec && rec.send && rec.send.token ? `${rec.send.token.symbol}@${rec.send.token.chain}` : null,
+    received_amount: st.amount_out ?? (rec && (rec.receive.exact || rec.receive.estimated)) ?? null,
+    received_token: rec && rec.receive && rec.receive.token ? `${rec.receive.token.symbol}@${rec.receive.token.chain}` : null,
+    recipient: (rec && rec.recipient) || null, invoice_id: (rec && rec.invoice) || null,
+    origin_tx: (st.origin_tx || []).join(" "), destination_tx: (st.destination_tx || []).join(" "),
+    service_fee_bps: (rec && rec.fee_bps) ?? null, created_at: (rec && rec.created_at) || null, issued_at: new Date().toISOString(),
+  };
+  const signature = await hmacHex(c.receiptSecret, canon(receipt));
+  return { receipt, signature, verify: `POST ${c.origin}/api/verify with {"receipt": <receipt>, "signature": "<signature>"} to confirm it is genuine and unchanged.` };
+}
+async function verifyReceipt(c, a) {
+  let r = a.receipt;
+  if (typeof r === "string") { try { r = JSON.parse(r); } catch { throw new UserError("receipt must be the receipt object (or its JSON)"); } }
+  if (!r || typeof r !== "object" || !a.signature) throw new UserError("pass receipt and signature exactly as get_receipt returned them");
+  const good = await hmacHex(c.receiptSecret, canon(r));
+  return { valid: good === String(a.signature).trim().toLowerCase(), message: good === String(a.signature).trim().toLowerCase() ? "Genuine Swap Ripper receipt, unchanged." : "NOT valid: the receipt was changed or the signature is wrong." };
 }
 
 // ---- Payment links: humans or agents get paid exactly N tokens; payer uses any token
@@ -867,10 +974,19 @@ async function createPaymentLink(c, a) {
   if (a.label) p.set("label", String(a.label).slice(0, 80));
   const ref = a.referrer ? cleanReferrer(c, a.referrer) : null;
   if (ref) p.set("ref", ref);
+  let invoice_id = null;
+  if (c.kv) {
+    invoice_id = newInvoiceId(); p.set("inv", invoice_id);
+    try { await c.kv.put(`inv:${invoice_id}`, JSON.stringify({ to, token: dst.symbol, chain: dst.blockchain, amount: a.amount || null,
+      label: a.label ? String(a.label).slice(0, 80) : null, created_at: new Date().toISOString(), link: `${c.origin}/pay?${p}`, deposits: [] }), { expirationTtl: INV_TTL }); }
+    catch { invoice_id = null; p.delete("inv"); }
+  }
   const url = `${c.origin}/pay?${p}`;
   track(c, "links_created");
   return {
     payment_link: url,
+    invoice_id,
+    check_payment: invoice_id ? `Call check_payment with invoice_id='${invoice_id}' any time to see if it's paid.` : undefined,
     receives: `${a.amount ? a.amount + " " : ""}${dst.symbol} on ${dst.blockchain}`,
     recipient: to,
     how_it_works: "Share the link. The payer picks any token on any chain; the recipient receives exactly this token. Non-custodial, auto-refund to the payer if anything fails.",
@@ -1148,7 +1264,7 @@ const TOOLS = [
   {
     name: "create_payment_link",
     title: "Create a 'pay me in any crypto' link",
-    description: "Create a shareable payment link (like an invoice). The payer can pay with ANY token on ANY chain; the recipient receives exactly the token you choose (e.g. 50 USDC on Base). Great for agents that sell services to humans or other agents. No account needed.",
+    description: "Create a shareable payment link that is also a trackable invoice. The payer can pay with ANY token on ANY chain; you receive exactly the token you choose (e.g. 50 USDC on Base). Returns an invoice_id: call check_payment to see when it is paid, then get_receipt for signed proof. Great for agents that sell services to humans or other agents. No account needed.",
     inputSchema: { type: "object", required: ["token", "recipient"], properties: {
       token: { type: "string", description: "Token to receive, e.g. 'USDC'." },
       chain: { type: "string", description: "Chain to receive on, e.g. 'base'." },
@@ -1159,6 +1275,38 @@ const TOOLS = [
     } },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     run: createPaymentLink,
+  },
+  {
+    name: "check_payment",
+    title: "Did I get paid? Check an invoice",
+    description: "Check whether an invoice (from create_payment_link) has been paid. Returns unpaid / processing / paid, every payment attempt with its status and blockchain transaction, and how to get a signed receipt. Use it to deliver your service only after you've been paid.",
+    inputSchema: { type: "object", required: ["invoice_id"], properties: {
+      invoice_id: { type: "string", description: "The invoice_id returned by create_payment_link (starts with 'inv_')." },
+    } },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+    run: checkPayment,
+  },
+  {
+    name: "get_receipt",
+    title: "Signed receipt for a completed payment",
+    description: "Get a clean, digitally signed receipt for a completed swap or payment: what was paid, what was received, by whom, on which chains, with transaction hashes and the fee. Share it with your owner, a seller or another agent; anyone can confirm it's genuine with verify_receipt.",
+    inputSchema: { type: "object", required: ["deposit_address"], properties: {
+      deposit_address: { type: "string", description: "The deposit_address of the swap or payment." },
+      deposit_memo: { type: "string", description: "deposit_memo, if one was returned." },
+    } },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+    run: getReceipt,
+  },
+  {
+    name: "verify_receipt",
+    title: "Check a receipt is genuine",
+    description: "Confirm that a Swap Ripper receipt is genuine and unchanged. Pass the receipt object and signature exactly as get_receipt returned them.",
+    inputSchema: { type: "object", required: ["receipt", "signature"], properties: {
+      receipt: { description: "The receipt object (or its JSON text).", anyOf: [{ type: "object" }, { type: "string" }] },
+      signature: { type: "string", description: "The signature string." },
+    } },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    run: verifyReceipt,
   },
   {
     name: "refuel_gas",
@@ -1325,11 +1473,11 @@ async function handleRest(request, url, c) {
   if (request.method === "POST") {
     try { args = { ...args, ...(await request.json()) }; } catch { /* empty body ok */ }
   }
-  const map = { tokens: "search_tokens", chains: "list_chains", quote: "get_quote", swap: "create_swap", pay: "pay_exact", status: "get_swap_status", prices: "get_prices", compare: "compare_quotes", text: "quote_from_text", referrals: "referral_stats", link: "create_payment_link", gas: "refuel_gas", x402: "fund_x402", payany: "pay" };
+  const map = { tokens: "search_tokens", chains: "list_chains", quote: "get_quote", swap: "create_swap", pay: "pay_exact", status: "get_swap_status", prices: "get_prices", compare: "compare_quotes", text: "quote_from_text", referrals: "referral_stats", link: "create_payment_link", invoice: "check_payment", receipt: "get_receipt", verify: "verify_receipt", gas: "refuel_gas", x402: "fund_x402", payany: "pay" };
   const tool = TOOL_MAP[map[route]];
   if (tool) track(c, `rest:${route}`);
   if (!tool) return json({ error: "Unknown endpoint", endpoints: Object.keys(map).map((k) => `/api/${k}`) }, 404);
-  if (["swap", "pay", "compare", "gas", "x402", "payany"].includes(route) && request.method !== "POST") return json({ error: `Use POST for /api/${route}` }, 405);
+  if (["swap", "pay", "compare", "gas", "x402", "payany", "verify"].includes(route) && request.method !== "POST") return json({ error: `Use POST for /api/${route}` }, 405);
   try { return json(await tool.run(c, args)); }
   catch (e) { return json({ error: e.message }, e instanceof UserError ? 400 : 502); }
 }
@@ -1448,6 +1596,7 @@ table{border-collapse:collapse;width:100%}td{padding:6px 8px;border-top:1px soli
 <h2>Connect in 10 seconds</h2><pre>${origin}/mcp</pre>
 <pre>{ "mcpServers": { "swap-ripper": { "url": "${origin}/mcp" } } }</pre>
 <h2>What agents can do</h2><table>${TOOLS.map((t) => `<tr><td><code>${t.name}</code></td><td>${t.description}</td></tr>`).join("")}</table>
+<h2>Get paid, with proof</h2><p>Payment links are trackable invoices: <code>check_payment</code> tells a selling agent when it has been paid, and <code>get_receipt</code> issues a signed receipt that anyone can verify with <code>verify_receipt</code>. Deliver only after you are paid.</p>
 <h2>Pay anything</h2><p>Hand the <code>pay</code> tool any bill: an x402 invoice, a Solana Pay or Ethereum payment link, a Bitcoin link, a payment link, or just "send 20 USDC to 0x… on Base". It works out who gets what and pays it exactly with whatever you hold, on any chain.</p>
 <h2>Best price or fastest: your choice</h2><p>By default every swap and payment is quoted on two networks at once and sent through whichever is cheaper for you, with automatic failover if one is down. Need it now? Pass <code>speed: "fast"</code> for fills in seconds.</p>
 <h2>Proven best price</h2><p>Every quote is checked live against Relay at the same moment, and the result is in the answer (<code>best_price_check</code>). No trust needed: agents see exactly how much more they get, or if going direct would be cheaper.</p>
@@ -1474,7 +1623,7 @@ const PAY_WITH = [
 
 function payPage(origin, q) {
   const cfgJson = JSON.stringify({ to: q.get("to") || "", token: q.get("token") || "", chain: q.get("chain") || "",
-    amount: q.get("amount") || "", label: q.get("label") || "", ref: q.get("ref") || "", payWith: PAY_WITH })
+    amount: q.get("amount") || "", label: q.get("label") || "", ref: q.get("ref") || "", inv: /^inv_[a-z0-9]{12}$/.test(q.get("inv") || "") ? q.get("inv") : "", payWith: PAY_WITH })
     .replace(/</g, "\\u003c");
   const builder = !q.get("to");
   const title = builder ? "Create a crypto payment link" : `Pay ${esc(q.get("amount") || "")} ${esc(q.get("token") || "")}`.replace(/\s+/g, " ");
@@ -1534,6 +1683,7 @@ if (!C.to) {
     btn.disabled = true; out.innerHTML = "<p>Finding the best price…</p>";
     const body = { token: C.token, chain: C.chain, amount_out: amount, pay_with_token: ps, pay_with_chain: pc, recipient: C.to, refund_address: rf.value.trim() };
     if (C.ref) body.referrer = C.ref;
+    if (C.inv) body.invoice = C.inv;
     const r = await fetch("/api/pay", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const j = await r.json(); btn.disabled = false;
     if (j.error) { out.innerHTML = '<p class="err">' + e(j.error) + '</p>'; return; }
@@ -1542,7 +1692,7 @@ if (!C.to) {
       '<p class="muted">on the <b>' + e(j.deposit_chain) + '</b> network</p>' +
       '<label>To this one-time address</label><div class="row"><div class="mono">' + e(j.deposit_address) + '</div>' + copyBtn(j.deposit_address) + '</div>' +
       (j.deposit_memo ? '<label>Memo (required)</label><div class="row"><div class="mono">' + e(j.deposit_memo) + '</div>' + copyBtn(j.deposit_memo) + '</div>' : '') +
-      '<p class="muted">Send before ' + e(new Date(j.deadline).toLocaleString()) + '. Recipient gets exactly ' + e(amount) + ' ' + e(C.token) + '.</p>' +
+      '<p class="muted">' + (j.deadline ? 'Send before ' + e(new Date(j.deadline).toLocaleString()) : 'Send it right away') + '. Recipient gets exactly ' + e(amount) + ' ' + e(C.token) + '.</p>' +
       '<p id="st" class="sub">⏳ Waiting for your payment…</p>';
     const st = document.getElementById("st");
     const poll = async () => {
