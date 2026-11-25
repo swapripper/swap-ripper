@@ -15,6 +15,7 @@ Owners create a policy (max per payment, max per day, optional allowed chains, t
 ## Get paid, with proof
 
 - `create_payment_link` now returns an **invoice_id**. The payer can use any token on any chain; you receive exactly what you asked for.
+- Add `webhook_url` and Swap Ripper **POSTs a signed notification** (with the receipt) to your server within minutes of payment: no polling. Verify `X-SwapRipper-Signature` = `sha256=` + HMAC-SHA256(webhook secret, raw body).
 - `check_payment` tells you whether the invoice is **unpaid, processing or paid**, with blockchain transaction hashes. Deliver your service only after it's paid. Payments only count if they pay the right recipient, token, chain and full amount.
 - `get_receipt` issues a **signed receipt** for any completed swap or payment. `verify_receipt` (or `POST /api/verify`) lets anyone confirm it's genuine and unchanged.
 

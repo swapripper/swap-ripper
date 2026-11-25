@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "2.1.0";
+const VERSION = "2.2.0";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -1036,13 +1036,18 @@ async function checkPayment(c, a) {
   const paid = payments.find((p) => p.status === "SUCCESS");
   const processing = payments.find((p) => ["PROCESSING", "KNOWN_DEPOSIT_TX"].includes(p.status));
   const status = paid ? "paid" : processing ? "processing" : "unpaid";
-  return {
+  const result = {
     invoice_id: id, status, paid: !!paid,
     invoice: { to: v.to, token: v.token, chain: v.chain, amount: v.amount || null, label: v.label || null, created_at: v.created_at, payment_link: v.link },
     payments,
     receipt_hint: paid ? `get_receipt with deposit_address=${paid.deposit_address} returns a signed receipt.` : undefined,
     note: "Tracks payments made through this invoice's Swap Ripper link or the pay tool. A payer who sends the token directly (no swap) won't show here; check the recipient wallet for those.",
   };
+  if (v.webhook) {
+    if (paid) await notifyPaid(c, id, v, result);
+    result.webhook = { url: v.webhook, notified_at: v.notified_at || null, last_attempt: v.webhook_last || null, gave_up: !!v.webhook_gave_up };
+  }
+  return result;
 }
 async function getReceipt(c, a) {
   const dep = String(a.deposit_address || "").trim();
@@ -1071,6 +1076,55 @@ async function verifyReceipt(c, a) {
   return { valid: good === String(a.signature).trim().toLowerCase(), message: good === String(a.signature).trim().toLowerCase() ? "Genuine Swap Ripper receipt, unchanged." : "NOT valid: the receipt was changed or the signature is wrong." };
 }
 
+// ---- Payment notifications (webhooks): POST to the seller the moment an invoice is paid
+const PUBLIC_ORIGIN = "https://swap-ripper.szydlow45.workers.dev";
+function checkWebhookUrl(u) {
+  let x; try { x = new URL(String(u)); } catch { throw new UserError("webhook_url must be a full https:// URL"); }
+  if (x.protocol !== "https:") throw new UserError("webhook_url must use https://");
+  const h = x.hostname.toLowerCase();
+  if (h === "localhost" || h.endsWith(".local") || h.endsWith(".internal") || /^\d+\.\d+\.\d+\.\d+$/.test(h) || h.includes(":") || h.startsWith("["))
+    throw new UserError("webhook_url must be a public hostname (no IP addresses or localhost)");
+  return x.toString();
+}
+async function hmacWithKey(key, msg) {
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(msg));
+  return Array.from(new Uint8Array(sig), (x) => x.toString(16).padStart(2, "0")).join("");
+}
+async function notifyPaid(c, id, v, result) {
+  if (!v.webhook || v.notified_at || !c.kv) return;
+  const paid = result.payments.find((p) => p.status === "SUCCESS");
+  if (!paid) return;
+  let receipt = null;
+  try { receipt = await getReceipt(c, { deposit_address: paid.deposit_address }); } catch { /* still notify */ }
+  const body = JSON.stringify({ event: "invoice.paid", invoice_id: id, invoice: result.invoice, payment: paid,
+    receipt: receipt && receipt.receipt, receipt_signature: receipt && receipt.signature, sent_at: new Date().toISOString() });
+  const sig = await hmacWithKey(v.webhook_secret, body);
+  let ok = false, code = 0;
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 5000);
+  try {
+    const r = await fetch(v.webhook, { method: "POST", signal: ctl.signal, redirect: "manual",
+      headers: { "Content-Type": "application/json", "User-Agent": "SwapRipper-Webhook/1", "X-SwapRipper-Event": "invoice.paid", "X-SwapRipper-Signature": `sha256=${sig}` }, body });
+    code = r.status; ok = r.status >= 200 && r.status < 300;
+  } catch { ok = false; } finally { clearTimeout(t); }
+  v.webhook_attempts = (v.webhook_attempts || 0) + 1;
+  v.webhook_last = { at: new Date().toISOString(), status: code || "no response" };
+  if (ok || v.webhook_attempts >= 12) { v.notified_at = ok ? new Date().toISOString() : null; v.webhook_gave_up = !ok; try { await c.kv.delete(`hook:${id}`); } catch { /* ignore */ } }
+  try { await c.kv.put(`inv:${id}`, JSON.stringify(v), { expirationTtl: INV_TTL }); } catch { /* ignore */ }
+  if (ok) track(c, "webhooks_sent");
+}
+// Runs every few minutes (Cloudflare cron): checks invoices that have a webhook and aren't notified yet.
+async function runWebhookSweep(c) {
+  if (!c.kv || !c.kv.list) return 0;
+  const { keys } = await c.kv.list({ prefix: "hook:", limit: 50 });
+  let n = 0;
+  for (const k of keys) {
+    const id = k.name.slice(5);
+    try { await checkPayment(c, { invoice_id: id }); n++; } catch { /* expired or bad: drop it */ try { await c.kv.delete(k.name); } catch { /* ignore */ } }
+  }
+  return n;
+}
+
 // ---- Payment links: humans or agents get paid exactly N tokens; payer uses any token
 async function createPaymentLink(c, a) {
   const dst = await resolveToken(c, a.token, a.chain);
@@ -1081,12 +1135,18 @@ async function createPaymentLink(c, a) {
   if (a.label) p.set("label", String(a.label).slice(0, 80));
   const ref = a.referrer ? cleanReferrer(c, a.referrer) : null;
   if (ref) p.set("ref", ref);
-  let invoice_id = null;
+  let invoice_id = null, webhook_secret = null;
+  const webhook = a.webhook_url ? checkWebhookUrl(a.webhook_url) : null;
+  if (webhook && !c.kv) throw new UserError("payment notifications are unavailable right now");
   if (c.kv) {
     invoice_id = newInvoiceId(); p.set("inv", invoice_id);
-    try { await c.kv.put(`inv:${invoice_id}`, JSON.stringify({ to, token: dst.symbol, chain: dst.blockchain, amount: a.amount || null,
-      label: a.label ? String(a.label).slice(0, 80) : null, created_at: new Date().toISOString(), link: `${c.origin}/pay?${p}`, deposits: [] }), { expirationTtl: INV_TTL }); }
-    catch { invoice_id = null; p.delete("inv"); }
+    if (webhook) webhook_secret = randId("whsec_", 24);
+    try {
+      await c.kv.put(`inv:${invoice_id}`, JSON.stringify({ to, token: dst.symbol, chain: dst.blockchain, amount: a.amount || null,
+        label: a.label ? String(a.label).slice(0, 80) : null, created_at: new Date().toISOString(), link: `${c.origin}/pay?${p}`, deposits: [],
+        webhook, webhook_secret }), { expirationTtl: INV_TTL });
+      if (webhook) await c.kv.put(`hook:${invoice_id}`, "1", { expirationTtl: 30 * 86400 });
+    } catch { invoice_id = null; webhook_secret = null; p.delete("inv"); }
   }
   const url = `${c.origin}/pay?${p}`;
   track(c, "links_created");
@@ -1094,6 +1154,8 @@ async function createPaymentLink(c, a) {
     payment_link: url,
     invoice_id,
     check_payment: invoice_id ? `Call check_payment with invoice_id='${invoice_id}' any time to see if it's paid.` : undefined,
+    webhook: webhook_secret ? { url: webhook, secret: webhook_secret,
+      how_it_works: "When the invoice is paid, Swap Ripper POSTs JSON {event:'invoice.paid', invoice_id, payment, receipt, receipt_signature} to your URL within minutes (retries for about an hour). Verify the X-SwapRipper-Signature header: it is 'sha256=' + HMAC-SHA256(secret, raw request body) in hex. Keep the secret private." } : undefined,
     receives: `${a.amount ? a.amount + " " : ""}${dst.symbol} on ${dst.blockchain}`,
     recipient: to,
     how_it_works: "Share the link. The payer picks any token on any chain; the recipient receives exactly this token. Non-custodial, auto-refund to the payer if anything fails.",
@@ -1378,6 +1440,7 @@ const TOOLS = [
       amount: { type: "string", description: "Optional fixed amount, e.g. '50'. Leave empty to let the payer choose." },
       recipient: { type: "string", description: "Your address on that chain." },
       label: { type: "string", description: "Optional note shown to the payer, e.g. 'Invoice #12' (max 80 chars)." },
+      webhook_url: { type: "string", description: "Optional https URL. When the invoice is paid, Swap Ripper POSTs a signed notification (with the receipt) to it, so you don't have to poll." },
       referrer: REFERRER,
     } },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -1751,7 +1814,7 @@ table{border-collapse:collapse;width:100%}td{padding:6px 8px;border-top:1px soli
 <pre>{ "mcpServers": { "swap-ripper": { "url": "${origin}/mcp" } } }</pre>
 <h2>What agents can do</h2><table>${TOOLS.map((t) => `<tr><td><code>${t.name}</code></td><td>${t.description}</td></tr>`).join("")}</table>
 <h2>Spending limits owners can trust</h2><p>Owners set limits (per payment, per day, chains, tokens, recipients) and give their agent a policy-locked URL. Anything over the limits is refused before payment instructions exist, with a spending log and an instant off switch. <a href="/limits"><b>Set limits for your agent →</b></a></p>
-<h2>Get paid, with proof</h2><p>Payment links are trackable invoices: <code>check_payment</code> tells a selling agent when it has been paid, and <code>get_receipt</code> issues a signed receipt that anyone can verify with <code>verify_receipt</code>. Deliver only after you are paid.</p>
+<h2>Get paid, with proof</h2><p>Payment links are trackable invoices (add a <code>webhook_url</code> and your server is notified the moment it is paid): <code>check_payment</code> tells a selling agent when it has been paid, and <code>get_receipt</code> issues a signed receipt that anyone can verify with <code>verify_receipt</code>. Deliver only after you are paid.</p>
 <h2>Pay anything</h2><p>Hand the <code>pay</code> tool any bill: an x402 invoice, a Solana Pay or Ethereum payment link, a Bitcoin link, a payment link, or just "send 20 USDC to 0x… on Base". It works out who gets what and pays it exactly with whatever you hold, on any chain.</p>
 <h2>Best price or fastest: your choice</h2><p>By default every swap and payment is quoted on two networks at once and sent through whichever is cheaper for you, with automatic failover if one is down. Need it now? Pass <code>speed: "fast"</code> for fills in seconds.</p>
 <h2>Proven best price</h2><p>Every quote is checked live against Relay at the same moment, and the result is in the answer (<code>best_price_check</code>). No trust needed: agents see exactly how much more they get, or if going direct would be cheaper.</p>
@@ -1911,6 +1974,11 @@ if (!C.to) {
 
 // ------------------------------------------------------------------ entry
 export default {
+  async scheduled(event, env, ctx) {
+    const c = cfg(env); c.origin = PUBLIC_ORIGIN;
+    PENDING = ctx && ctx.waitUntil ? (p) => ctx.waitUntil(p) : null;
+    ctx.waitUntil(runWebhookSweep(c));
+  },
   async fetch(request, env, ctx) {
     PENDING = ctx && ctx.waitUntil ? (p) => ctx.waitUntil(p) : null;
     const url = new URL(request.url);
