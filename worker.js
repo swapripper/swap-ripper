@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "3.1.0";
+const VERSION = "3.2.0";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -2240,36 +2240,175 @@ function serverJson(origin) {
 }
 
 function landing(origin, c) {
+  const fee = (c.feeBps / 100).toFixed(1).replace(/\.0$/, "");
+  const toolRows = TOOLS.map((t) => `<tr><td><code>${t.name}</code></td><td>${t.title}</td></tr>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Swap Ripper: cross-chain swaps for AI agents (MCP)</title>
-<meta name="description" content="${DESCRIPTION}">
-<link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt"><link rel="icon" href="/icon.svg" type="image/svg+xml">
-<style>:root{color-scheme:light dark}body{font:16px/1.6 system-ui,sans-serif;max-width:780px;margin:40px auto;padding:0 20px}
-code,pre{background:rgba(127,127,127,.15);border-radius:6px}pre{padding:12px;overflow:auto}code{padding:2px 5px}
-h1{margin-bottom:0}.sub{opacity:.75;margin-top:4px}.tag{display:inline-block;border:1px solid rgba(127,127,127,.4);border-radius:99px;padding:1px 10px;margin:2px;font-size:13px}
-table{border-collapse:collapse;width:100%}td{padding:6px 8px;border-top:1px solid rgba(127,127,127,.25);vertical-align:top}</style></head><body>
-<h1>⚡ Swap Ripper</h1><p class="sub">Cross-chain swaps for AI agents, in one tool call.</p>
-<p>${DESCRIPTION}</p>
-<p><span class="tag">MCP</span><span class="tag">REST + OpenAPI</span><span class="tag">A2A card</span><span class="tag">No API key</span><span class="tag">Non-custodial</span><span class="tag">Auto-refund</span><span class="tag">${c.feeBps / 100}% fee, lower for big swaps</span><span class="tag">Referral rewards</span></p>
-<h2>Connect in 10 seconds</h2><pre>${origin}/mcp</pre><p>Want fewer tools in your agent's context? Use <code>${origin}/mcp/lite</code> (the 6 essentials). Building? Add <code>test: true</code> to any payment for a free sandbox run, and <code>request_id</code> so retries never pay twice.</p>
-<pre>{ "mcpServers": { "swap-ripper": { "url": "${origin}/mcp" } } }</pre>
-<h2>What agents can do</h2><table>${TOOLS.map((t) => `<tr><td><code>${t.name}</code></td><td>${t.description}</td></tr>`).join("")}</table>
-<h2>Sell your API to AI agents, in any coin</h2><p>Put a paywall in front of any API in 60 seconds, no code: agents get a 402, pay with any coin on any chain (straight to your wallet), and their calls go through. Signed receipts, payment tracking and a public directory included. <a href="/sell"><b>Create a paywall →</b></a></p>
-<h2>Spending limits owners can trust</h2><p>Owners set limits (per payment, per day, chains, tokens, recipients) and give their agent a policy-locked URL. Anything over the limits is refused before payment instructions exist, with a spending log and an instant off switch. <a href="/limits"><b>Set limits for your agent →</b></a></p>
-<h2>Get paid, with proof</h2><p>Payment links are trackable invoices (add a <code>webhook_url</code> and your server is notified the moment it is paid): <code>check_payment</code> tells a selling agent when it has been paid, and <code>get_receipt</code> issues a signed receipt that anyone can verify with <code>verify_receipt</code>. Deliver only after you are paid.</p>
-<h2>Pay anything</h2><p>Hand the <code>pay</code> tool any bill: an x402 invoice, a Solana Pay or Ethereum payment link, a Bitcoin link, a payment link, or just "send 20 USDC to 0x… on Base". It works out who gets what and pays it exactly with whatever you hold, on any chain.</p>
-<h2>Best price or fastest: your choice</h2><p>By default every swap and payment is quoted on two networks at once and sent through whichever is cheaper for you, with automatic failover if one is down. Need it now? Pass <code>speed: "fast"</code> for fills in seconds.</p>
-<h2>Proven best price</h2><p>Every quote is checked live against Relay at the same moment, and the result is in the answer (<code>best_price_check</code>). No trust needed: agents see exactly how much more they get, or if going direct would be cheaper.</p>
-<h2>Got HTTP 402? Pay it from any chain</h2><p>x402 paywalls usually want USDC on Base, but your agent's money is on Solana, Ethereum or Bitcoin? Pass the 402 response to <code>fund_x402</code>. It reads the invoice and tops up your wallet on the right chain with an exact amount, paid with whatever you hold. Fund once (~$5) and dozens of future 402 calls need no swap.</p>
-<h2>Get paid in any crypto</h2><p>Make a payment link in seconds: your customer pays with whatever coin they hold, and you receive exactly the token you want. <a href="/pay"><b>Create a payment link →</b></a></p>
-<h2>Gas station</h2><p>Out of gas on Base, Arbitrum, Solana or 10 other chains? <code>refuel_gas</code> delivers a few dollars of native gas to any address, paid with any token.</p>
-<h2>Earn by routing swaps</h2><p>Pass <code>referrer: "yourname.near"</code> on any call. You earn <b>1/3 of the fee</b> on every swap you route, paid automatically on-chain. Users pay the same price.</p>
-<h2>REST</h2><pre>GET  ${origin}/api/quote?from_token=USDC&from_chain=solana&to_token=ETH&to_chain=base&amount=25
-POST ${origin}/api/swap      POST ${origin}/api/pay      POST ${origin}/api/x402      POST ${origin}/api/compare
-GET  ${origin}/api/status?deposit_address=...&wait_seconds=25
-GET  ${origin}/api/prices?symbols=BTC,ETH,SOL</pre>
-<p><a href="/openapi.json">OpenAPI</a> · <a href="/llms.txt">llms.txt</a> · <a href="/.well-known/agent.json">Agent card</a> · <a href="/server.json">MCP registry entry</a> · Humans: <a href="https://t.me/IntentsSwapRipperBot">Telegram bot</a></p>
-<p style="font-size:13px;opacity:.7">Powered by NEAR Intents. Not available to sanctioned persons or jurisdictions. Provided as-is; double-check addresses.</p>
+<title>Swap Ripper: money for AI agents, in any coin</title>
+<meta name="description" content="Let AI agents pay for anything and get paid by anyone, in any coin on 25+ chains. No account, never holds your money. MCP server, REST API and no-code paywalls.">
+<link rel="icon" href="/icon.svg" type="image/svg+xml"><link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--mist:#EEF1F6;--paper:#FFFFFF;--ink:#14213D;--soft:#4A5878;--line:#D5DBE7;--violet:#6D3AED;--teal:#0891B2;--ok:#0F8A5F;--warn:#B45309}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--mist);color:var(--ink);font:17px/1.6 "Instrument Sans",system-ui,sans-serif}
+a{color:var(--violet);text-underline-offset:3px}a:hover{color:var(--ink)}
+:focus-visible{outline:3px solid var(--teal);outline-offset:2px;border-radius:6px}
+code,pre,.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.86em}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+header.top{display:flex;align-items:center;justify-content:space-between;padding:22px 0}
+.brand{display:flex;align-items:center;gap:10px;font:700 20px "Bricolage Grotesque",sans-serif;color:var(--ink);text-decoration:none}
+.brand img{width:30px;height:30px}
+nav a{margin-left:22px;color:var(--soft);text-decoration:none;font-weight:500}nav a:hover{color:var(--ink)}
+.hero{display:grid;grid-template-columns:1.05fr 1fr;gap:56px;align-items:start;padding:40px 0 72px}
+h1{font:800 clamp(40px,5.6vw,68px)/1.02 "Bricolage Grotesque",sans-serif;letter-spacing:-.025em;margin:0 0 22px;max-width:12ch}
+.lede{font-size:20px;color:var(--soft);max-width:34ch;margin:0 0 30px}
+.connect{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:6px 6px 6px 16px;display:flex;align-items:center;gap:10px;max-width:520px}
+.connect code{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
+.btn{font:600 15px "Instrument Sans",sans-serif;border:0;border-radius:10px;padding:11px 16px;cursor:pointer;text-decoration:none;display:inline-block}
+.btn.go{background:var(--violet);color:#fff}.btn.go:hover{background:#5527d6;color:#fff}
+.btn.plain{background:transparent;color:var(--ink);border:1px solid var(--line)}.btn.plain:hover{border-color:var(--ink)}
+.small{font-size:14px;color:var(--soft)}
+.hero .small{margin:12px 0 26px}
+.actions{display:flex;gap:10px;flex-wrap:wrap}
+/* the one bold element: live demo */
+.demo{background:var(--ink);color:#E7ECF7;border-radius:22px;padding:26px;box-shadow:0 30px 60px -30px rgba(20,33,61,.55);position:relative;overflow:hidden}
+.demo::before{content:"";position:absolute;inset:0 0 auto 0;height:5px;background:linear-gradient(90deg,var(--violet),#06B6D4)}
+.demo h2{font:700 26px "Bricolage Grotesque",sans-serif;margin:4px 0 6px;color:#fff;letter-spacing:-.01em}
+.demo p{margin:0 0 16px;color:#A9B4CF;font-size:15px}
+.demo textarea{width:100%;min-height:92px;resize:vertical;background:#0E1830;color:#fff;border:1px solid #2A3A63;border-radius:12px;padding:14px;font:14px/1.5 "JetBrains Mono",monospace}
+.demo textarea:focus-visible{outline:3px solid #06B6D4}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 16px}
+.chip{background:transparent;color:#C9D2E8;border:1px solid #33456F;border-radius:999px;padding:6px 12px;font:500 13px "Instrument Sans",sans-serif;cursor:pointer}
+.chip:hover{border-color:#06B6D4;color:#fff}
+.demo .btn.go{background:#06B6D4;color:#08203A}.demo .btn.go:hover{background:#22d3ee}
+.result{margin-top:18px;border-top:1px solid #2A3A63;padding-top:16px;min-height:24px;font-size:15px}
+.result dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0}
+.result dt{color:#8F9BBA}.result dd{margin:0;color:#fff;word-break:break-all}
+.result .ok{color:#5EEAD4;font-weight:600;margin-bottom:10px}.result .bad{color:#FCA5A5}
+@media (prefers-reduced-motion:no-preference){.result.show{animation:rise .35s ease-out}@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}}
+section{padding:64px 0;border-top:1px solid var(--line)}
+h2.sec{font:700 clamp(28px,3.4vw,40px)/1.1 "Bricolage Grotesque",sans-serif;letter-spacing:-.015em;margin:0 0 12px;max-width:22ch}
+.sec-lede{color:var(--soft);max-width:60ch;margin:0 0 36px}
+.paths{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border:1px solid var(--line);border-radius:18px;background:var(--paper);overflow:hidden}
+.path{padding:28px;border-right:1px solid var(--line)}.path:last-child{border-right:0}
+.path h3{font:700 22px "Bricolage Grotesque",sans-serif;margin:0 0 8px}
+.path p{margin:0 0 16px;color:var(--soft);font-size:16px}
+.path ul{margin:0 0 18px;padding-left:18px;font-size:15px}.path li{margin:4px 0}
+.facts{display:grid;grid-template-columns:repeat(2,1fr);gap:28px 48px}
+.fact h3{font:700 20px "Bricolage Grotesque",sans-serif;margin:0 0 6px}
+.fact p{margin:0;color:var(--soft);font-size:16px;max-width:46ch}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.tab{background:transparent;border:1px solid var(--line);border-radius:999px;padding:7px 14px;font:500 14px "Instrument Sans",sans-serif;color:var(--soft);cursor:pointer}
+.tab[aria-selected=true]{background:var(--ink);border-color:var(--ink);color:#fff}
+pre{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:18px;overflow:auto;margin:0;line-height:1.55}
+details{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:4px 18px;margin-top:14px}
+summary{cursor:pointer;padding:12px 0;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:15px;margin-bottom:12px}td{padding:8px 6px;border-top:1px solid var(--line);vertical-align:top}td:first-child{white-space:nowrap;width:1%}
+footer{padding:40px 0 60px;border-top:1px solid var(--line);color:var(--soft);font-size:14px}
+footer a{color:var(--soft)}
+@media (max-width:900px){.hero{grid-template-columns:1fr;gap:36px;padding-top:16px}.paths{grid-template-columns:1fr}.path{border-right:0;border-bottom:1px solid var(--line)}.path:last-child{border-bottom:0}.facts{grid-template-columns:1fr}nav a:not(:last-child){display:none}}
+</style></head><body>
+<div class="wrap">
+<header class="top"><a class="brand" href="/"><img src="/icon.svg" alt="">Swap Ripper</a>
+<nav><a href="#how">How it works</a><a href="#connect">Connect</a><a href="/sell">Sell your API</a><a href="https://github.com/swapripper/swap-ripper">GitHub</a></nav></header>
+
+<div class="hero">
+<div>
+<h1>Money for AI agents, in any coin.</h1>
+<p class="lede">Your agent can pay for anything and get paid by anyone, across 25+ blockchains. No account, no API key, and we never hold the money.</p>
+<div class="connect"><code id="mcpurl">${origin}/mcp</code><button class="btn go" id="copy" type="button">Copy</button></div>
+<p class="small">Add this MCP address to Claude, Cursor or any agent. Prefer fewer tools? Use <code>/mcp/lite</code>.</p>
+<div class="actions"><a class="btn plain" href="/sell">Sell your API to agents</a><a class="btn plain" href="/limits">Set spending limits</a></div>
+</div>
+
+<div class="demo" aria-live="polite">
+<h2>Hand it any bill</h2>
+<p>Paste a payment request in any format and see what Swap Ripper understands. This is a live call; nothing is paid.</p>
+<label for="bill" class="small" style="color:#8F9BBA">Payment request</label>
+<textarea id="bill" spellcheck="false">send 20 USDC to 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 on base</textarea>
+<div class="chips" role="group" aria-label="Examples">
+<button class="chip" type="button" data-v="send 20 USDC to 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 on base">Plain English</button>
+<button class="chip" type="button" data-v="solana:9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM?amount=0.5&amp;label=Coffee">Solana Pay link</button>
+<button class="chip" type="button" data-v="ethereum:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913@8453/transfer?address=0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045&amp;uint256=5000000">Ethereum payment link</button>
+<button class="chip" type="button" data-v="bitcoin:bc1qm34lsc65zpw79lxes69zkqmk6ee3ewf0j77s3h?amount=0.0005">Bitcoin link</button>
+<button class="chip" type="button" data-v='{"x402Version":2,"accepts":[{"scheme":"exact","network":"eip155:8453","amount":"10000","asset":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913","payTo":"0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"}]}'>HTTP 402 invoice</button>
+</div>
+<button class="btn go" id="read" type="button">Read this bill</button>
+<div class="result" id="result"></div>
+</div>
+</div>
+</div>
+
+<section id="how"><div class="wrap">
+<h2 class="sec">One connection for everything money</h2>
+<p class="sec-lede">Agents hit paywalls, owe invoices, sell services and need limits their owners trust. Swap Ripper handles each of these, in whatever coin is at hand.</p>
+<div class="paths">
+<div class="path"><h3>Pay anything</h3><p>Give the <code>pay</code> tool any bill and it pays the exact amount with whatever the agent holds.</p>
+<ul><li>x402 invoices, Solana Pay, Ethereum and Bitcoin links, plain text</li><li>Cheapest of two networks, with automatic backup</li><li>Gas top-ups on 13 chains</li></ul></div>
+<div class="path"><h3>Get paid by agents</h3><p>Sell an API or a service and receive exactly the coin you want, straight to your wallet.</p>
+<ul><li>No-code API paywalls with a public directory</li><li>Invoices that know when they're paid</li><li>Signed receipts and payment notifications</li></ul>
+<a class="btn go" href="/sell">Create a paywall</a></div>
+<div class="path"><h3>Keep spending safe</h3><p>Owners cap what an agent can spend before any payment instructions exist.</p>
+<ul><li>Per-payment and daily limits</li><li>Allowed chains, tokens and recipients</li><li>Spending log and an instant off switch</li></ul>
+<a class="btn plain" href="/limits">Set limits</a></div>
+</div>
+</div></section>
+
+<section><div class="wrap">
+<h2 class="sec">Why agents and builders pick it</h2>
+<div class="facts" style="margin-top:28px">
+<div class="fact"><h3>Best price, with proof</h3><p>Every quote is checked live against a competing network, and the answer shows both prices. The fee is ${fee}%, lower on large swaps.</p></div>
+<div class="fact"><h3>We never hold your money</h3><p>Each payment gets a one-time deposit address and goes straight to the recipient. If anything fails, it's refunded automatically.</p></div>
+<div class="fact"><h3>Free test mode</h3><p>Add <code>test: true</code> and every flow, from invoices to receipts and notifications, runs end to end with no real money.</p></div>
+<div class="fact"><h3>Built for retries</h3><p>Send a <code>request_id</code> and a repeated request returns the same payment instructions, so an agent never pays twice.</p></div>
+</div>
+</div></section>
+
+<section id="connect"><div class="wrap">
+<h2 class="sec">Connect in under a minute</h2>
+<p class="sec-lede">Standard remote MCP over Streamable HTTP, no authentication. Agents without MCP can use the REST API or read <a href="/llms.txt">llms.txt</a>.</p>
+<div class="tabs" role="tablist">
+<button class="tab" role="tab" aria-selected="true" data-k="claude">Claude / Cursor</button><button class="tab" role="tab" aria-selected="false" data-k="lc">LangChain</button><button class="tab" role="tab" aria-selected="false" data-k="oai">OpenAI Agents</button><button class="tab" role="tab" aria-selected="false" data-k="http">HTTP</button>
+</div>
+<pre id="code"></pre>
+<details><summary>All ${TOOLS.length} tools</summary><table>${toolRows}</table></details>
+<details><summary>REST endpoints and docs</summary><ul class="small"><li>OpenAPI spec: <a href="/openapi.json">/openapi.json</a></li><li>Agent card: <a href="/.well-known/agent.json">/.well-known/agent.json</a></li><li>Official MCP Registry: <a href="https://registry.modelcontextprotocol.io/v0/servers?search=swap-ripper">io.github.swapripper/swap-ripper</a></li></ul></details>
+</div></section>
+
+<footer><div class="wrap">Swap Ripper runs on the NEAR Intents and Relay solver networks. Open source (MIT) on <a href="https://github.com/swapripper/swap-ripper">GitHub</a>. Not available in sanctioned jurisdictions; crypto sent to a wrong address can't be recovered.</div></footer>
+
+<script>
+const O=${JSON.stringify(origin)};
+const snippets={
+ claude:'{ "mcpServers": { "swap-ripper": { "url": "'+O+'/mcp" } } }',
+ lc:'from langchain_mcp_adapters.client import MultiServerMCPClient\\nclient = MultiServerMCPClient({"swap-ripper": {"url": "'+O+'/mcp", "transport": "streamable_http"}})\\ntools = await client.get_tools()',
+ oai:'from agents import Agent\\nfrom agents.mcp import MCPServerStreamableHttp\\nasync with MCPServerStreamableHttp(params={"url": "'+O+'/mcp"}) as swap:\\n    agent = Agent(name="payer", mcp_servers=[swap])',
+ http:'curl -s -X POST '+O+'/api/payany \\\\\\n  -H "content-type: application/json" \\\\\\n  -d \\'{"request": "send 20 USDC to 0x... on base", "test": true}\\''
+};
+const code=document.getElementById("code");
+const setTab=(k)=>{code.textContent=snippets[k];document.querySelectorAll(".tab").forEach(t=>t.setAttribute("aria-selected",t.dataset.k===k?"true":"false"));};
+document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setTab(t.dataset.k));setTab("claude");
+document.getElementById("copy").onclick=async(e)=>{try{await navigator.clipboard.writeText(document.getElementById("mcpurl").textContent);e.target.textContent="Copied";setTimeout(()=>e.target.textContent="Copy",1500);}catch{}};
+const esc=(s)=>String(s??"").replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const bill=document.getElementById("bill"), out=document.getElementById("result");
+document.querySelectorAll(".chip").forEach(b=>b.onclick=()=>{bill.value=b.dataset.v;read();});
+async function read(){
+ out.className="result";out.innerHTML='<span style="color:#8F9BBA">Reading…</span>';
+ let req=bill.value.trim(); if(req.startsWith("{")){try{req=JSON.parse(req)}catch{}}
+ try{
+  const j=await (await fetch("/api/payany",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({request:req})})).json();
+  out.className="result show";
+  if(j.error){out.innerHTML='<div class="bad">'+esc(j.error)+'</div>';return;}
+  let rows=[];
+  if(j.invoice){const i=j.invoice;rows=[["Kind","x402 invoice"],["Pays for",i.pays_for||"an API call"],["Needs",i.required_per_call+" "+i.token.symbol+" on "+i.chain],["Top-up",i.top_up_amount+" "+i.token.symbol+" ("+(i.covers_about||"")+")"]];}
+  else{const u=j.understood||{};const kinds={text:"Plain English",solana_pay:"Solana Pay link",eip681:"Ethereum payment link",bip21:"Bitcoin link",payment_link:"Payment link",json:"JSON"};
+   rows=[["Kind",kinds[u.kind]||u.kind],["Pay to",u.pay_to],["Amount",(u.amount||"not set")+" "+(u.token||"")],["Chain",u.chain]];if(u.label)rows.push(["Note",u.label]);}
+  out.innerHTML='<div class="ok">Understood. Ready to pay with any coin.</div><dl>'+rows.map(r=>'<dt>'+esc(r[0])+'</dt><dd>'+esc(r[1])+'</dd>').join("")+'</dl>';
+ }catch(e){out.className="result show";out.innerHTML='<div class="bad">Couldn\\'t reach the server. Try again.</div>';}
+}
+document.getElementById("read").onclick=read;
+</script>
 </body></html>`;
 }
 
