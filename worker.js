@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "3.3.0";
+const VERSION = "3.3.1";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 1000; // per payment, kept low while the service is new
@@ -42,7 +42,7 @@ const DESCRIPTION =
   "Swap any token across 25+ blockchains (Bitcoin, Ethereum, Solana, Base, Arbitrum, BNB, Tron, " +
   "NEAR, Zcash, TON, Sui, XRP, Doge and more) in one call. Non-custodial, no API key, no wallet " +
   "connection: get a quote, receive a one-time deposit address, send funds, done. Powered by NEAR " +
-  "Intents solver network. One `pay` tool handles any payment request (x402, Solana Pay, EIP-681, Bitcoin links, plain text). Every quote is checked live against a competing network (proven best price). Automatic refund if a swap can't complete. Also: fund x402 (HTTP 402) payments " +
+  "Intents solver network. One `pay` tool handles any payment request (x402, Solana Pay, EIP-681, Bitcoin links, plain text). Every quote is compared live against a competing network to find the better price. If a swap can't complete, the solver network refunds automatically. Also: fund x402 (HTTP 402) payments " +
   "from any chain, pay exact amounts, gas refuel, and 'pay me in any crypto' links.";
 
 const INSTRUCTIONS =
@@ -90,6 +90,8 @@ function cfg(env) {
     relayKey: String(env.RELAY_API_KEY || "").trim(),
     relayFeeTo: String(env.RELAY_FEE_TO || "").trim().toLowerCase(),
     receiptSecret: String(env.RECEIPT_SECRET || env.ONECLICK_JWT || "swap-ripper"),
+    // Operator blocklist: paywall ids, invoice ids or wallet addresses, comma/space separated (Cloudflare variable BLOCKLIST).
+    block: new Set(String(env.BLOCKLIST || "").split(/[\s,]+/).map((x) => x.trim().toLowerCase()).filter(Boolean)),
     origin: "",
   };
 }
@@ -445,7 +447,7 @@ function fastReply(c, a, src, dst, f, recipient, refund) {
       `Send exactly ${f.amountInFormatted} ${src.symbol} on ${src.blockchain} to ${f.depositAddress}. Send it soon: fast quotes are short-lived.` +
         (EVM[src.blockchain] ? " deposit_tx is a ready-to-sign transaction for EVM wallets." : ""),
       "Then call get_swap_status with this deposit_address, route='fast' and wait_seconds=25 until final=true.",
-      "If anything fails, funds are refunded to refund_address automatically.",
+      "If the swap can't complete, the network refunds to refund_address automatically. Funds sent to a wrong address, chain or token may not be recoverable.",
     ],
     terms: `${c.origin}/terms`,
   };
@@ -550,6 +552,7 @@ function depositReply(c, a, src, dst, qq, recipient, refund) {
 // Smart routing: quote NEAR Intents and Relay at once, use whichever is cheaper for the agent;
 // if one network fails, the other takes over. speed='fast' forces Relay.
 async function routeSwap(c, a, src, dst, units, recipient, refund, usd, exactOutput) {
+  if (c.block && recipient && c.block.has(String(recipient).toLowerCase())) throw new UserError("This recipient has been blocked by Swap Ripper.");
   // No double payments: the same request_id returns the same payment instructions for 1 hour.
   let idemKey = null, idemFp = null;
   if (a.request_id != null && a.request_id !== "") {
@@ -1227,6 +1230,7 @@ function checkUpstreamUrl(u) {
 async function loadPaywall(c, id) {
   if (!PW_ID.test(String(id || ""))) throw new UserError("paywall id looks wrong (it starts with 'pw_')");
   if (!c.kv) throw new UserError("paywalls are unavailable right now");
+  if (c.block && c.block.has(String(id).toLowerCase())) throw new UserError("paywall not found");
   const raw = await c.kv.get(`pw:${id}`);
   if (!raw) throw new UserError("paywall not found");
   return JSON.parse(raw);
@@ -1289,7 +1293,7 @@ async function findPaywalls(c, a) {
   const q = String(a.query || "").toLowerCase().trim();
   const d = JSON.parse((await c.kv.get("pwdir")) || "[]");
   const words = q.split(/\s+/).filter(Boolean);
-  const hits = d.filter((x) => !words.length || words.every((w) => `${x.name} ${x.description}`.toLowerCase().includes(w)));
+  const hits = d.filter((x) => !(c.block && c.block.has(x.id))).filter((x) => !words.length || words.every((w) => `${x.name} ${x.description}`.toLowerCase().includes(w)));
   return { count: hits.length, paywalls: hits.slice(0, 25).map((x) => ({ paywall_id: x.id, name: x.name, description: x.description,
     gateway_url: gatewayUrl(c, x.id), price: `${x.price} ${x.token} on ${x.chain}`, calls_per_pack: x.calls,
     price_per_call: `${+(Number(x.price) / x.calls).toPrecision(4)} ${x.token}` })),
@@ -2354,7 +2358,7 @@ footer a{color:var(--soft)}
 <div class="path"><h3>Get paid by agents</h3><p>Sell an API or a service and receive exactly the coin you want, straight to your wallet.</p>
 <ul><li>No-code API paywalls with a public directory</li><li>Invoices that know when they're paid</li><li>Signed receipts and payment notifications</li></ul>
 <a class="btn go" href="/sell">Create a paywall</a></div>
-<div class="path"><h3>Keep spending safe</h3><p>Owners cap what an agent can spend before any payment instructions exist.</p>
+<div class="path"><h3>Keep spending in check</h3><p>Owners cap what an agent can spend before any payment instructions exist.</p>
 <ul><li>Per-payment and daily limits</li><li>Allowed chains, tokens and recipients</li><li>Spending log and an instant off switch</li></ul>
 <a class="btn plain" href="/limits">Set limits</a></div>
 </div>
@@ -2492,10 +2496,13 @@ h1{font-size:28px;margin:0 0 4px}h2{font-size:18px;margin:28px 0 6px}p,li{max-wi
 <h2>11. Changes and termination</h2>
 <p>We may change, suspend or stop the Service, or update these Terms, at any time. The date at the top shows the latest version. Continuing to use the Service means you accept the updated Terms.</p>
 
-<h2>12. Governing law</h2>
+<h2>12. Privacy</h2>
+<p>Swap Ripper doesn't ask for names, emails or accounts. It stores only what it needs to run: payment records (deposit addresses, amounts, tokens, chains, recipient and refund addresses), invoices, paywall and spending-policy settings, webhook addresses you provide, and anonymous usage counts. IP addresses are used briefly in memory to limit spam and are not stored. Our hosting provider (Cloudflare) and the payment networks handle technical data such as IP addresses under their own policies. Blockchain transactions are public by nature.</p>
+
+<h2>13. Governing law</h2>
 <p>These Terms are governed by the laws of the State of Wisconsin, USA, without regard to conflict-of-law rules. If any part of these Terms is unenforceable, the rest stays in effect.</p>
 
-<h2>13. Contact</h2>
+<h2>14. Contact</h2>
 <p>Questions or problems: open an issue on <a href="https://github.com/swapripper/swap-ripper/issues">GitHub</a>.</p>
 </body></html>`;
 }
@@ -2601,7 +2608,7 @@ function payPage(origin, q) {
   const title = builder ? "Create a crypto payment link" : `Pay ${esc(q.get("amount") || "")} ${esc(q.get("token") || "")}`.replace(/\s+/g, " ");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${title} · Swap Ripper</title>
-<meta name="description" content="Pay with any crypto on any chain. The recipient gets exactly what they asked for. Non-custodial, auto-refund.">
+<meta name="description" content="Pay with any crypto on any chain. The recipient gets exactly what they asked for. Non-custodial.">
 <style>:root{color-scheme:light dark;--b:rgba(127,127,127,.35)}*{box-sizing:border-box}
 body{font:16px/1.5 system-ui,sans-serif;max-width:520px;margin:32px auto;padding:0 16px}
 .card{border:1px solid var(--b);border-radius:14px;padding:20px;margin:14px 0}
@@ -2613,8 +2620,9 @@ button{background:#5b5bf0;color:#fff;border:none;margin-top:16px;cursor:pointer;
 .row{display:flex;gap:8px;align-items:center}.row .mono{flex:1}.copy{width:auto;margin:0;padding:8px 12px;font-size:13px}
 .ok{color:#1a9b4b;font-weight:600}.err{color:#d33}.muted{opacity:.65;font-size:13px}.hide{display:none}
 .steps{font-size:14px;padding-left:18px}</style></head><body>
+${builder ? "" : '<p style="background:rgba(255,170,0,.15);border-radius:10px;padding:10px 12px;font-size:14px;margin:0 0 6px">This payment request was created by someone else. Swap Ripper doesn\'t check who they are or what they\'re selling. Only pay people you trust.</p>'}
 <div id="app"></div>
-<p class="muted">Powered by <a href="/">Swap Ripper</a> on NEAR Intents · Non-custodial: funds go straight to the recipient, with automatic refund if anything fails. Not available in sanctioned jurisdictions.</p>
+<p class="muted">Powered by <a href="/">Swap Ripper</a> on NEAR Intents · Non-custodial software: funds go straight to the recipient. If a swap can't complete, the network refunds you automatically; crypto sent to a wrong address can't be recovered. <a href="/terms">Terms of Service</a>.</p>
 <script>
 const C = ${cfgJson};
 const $ = (h) => { const d = document.createElement("div"); d.innerHTML = h; return d.firstElementChild; };
@@ -2732,6 +2740,7 @@ export default {
       if (path === "/icon.svg" || path === "/favicon.svg" || path === "/favicon.ico") return new Response(ICON_SVG, { headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400", ...cors } });
       if (path === "/health") return json({ ok: true, version: VERSION, fee_bps: c.feeBps, fee_recipient_set: !!c.feeTo, api_key_set: !!c.jwt });
       if (path === "/") { track(c, "view:home"); return text(landing(origin, c), "text/html"); }
+      if (path === "/pay" && [url.searchParams.get("to"), url.searchParams.get("inv")].some((v) => v && c.block.has(v.toLowerCase()))) return new Response("This payment link has been disabled.", { status: 410, headers: { "Content-Type": "text/plain; charset=utf-8" } });
       if (path === "/pay") { track(c, url.searchParams.get("to") ? "view:pay_link" : "view:pay_builder"); return text(payPage(origin, url.searchParams), "text/html"); }
       return json({ error: "Not found" }, 404);
     } catch (e) {
