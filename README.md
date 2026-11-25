@@ -8,6 +8,20 @@ No API key. No sign-up. No wallet connection. Non-custodial, with automatic refu
 https://swap-ripper.szydlow45.workers.dev/mcp
 ```
 
+## New: pay anything
+
+Hand the `pay` tool **any** payment request and it pays it exactly, using whatever token you hold on any chain:
+
+- x402 / HTTP 402 invoices (v1 or v2, body or base64 header)
+- Solana Pay links (`solana:...?amount=&spl-token=`)
+- Ethereum payment links, EIP-681 (`ethereum:0x...@8453?value=` or `/transfer?address=&uint256=`), on Ethereum, Base, Arbitrum, Optimism, BNB, Polygon, Avalanche, Gnosis, Berachain
+- Bitcoin links, BIP21 (`bitcoin:bc1...?amount=`)
+- Swap Ripper payment links
+- Plain text: `send 20 USDC to 0xabc... on base`
+- JSON: `{ "to": "0x...", "token": "USDC", "chain": "base", "amount": "20" }`
+
+Call it with only `request` to see what it understood, then add `pay_with_token`, `pay_with_chain` and `refund_address` to get a deposit address. If you already hold the right token, it tells you to pay directly with no fee.
+
 ## New: got an HTTP 402? Pay it from any chain
 
 x402 paywalls usually ask for USDC on Base, but your agent's money is on Solana, Ethereum or Bitcoin. Pass the 402 response to **`fund_x402`**. It accepts x402 v1 or v2, either the JSON body or the base64 `PAYMENT-REQUIRED` header. Swap Ripper then:
@@ -92,6 +106,7 @@ curl -s -X POST https://swap-ripper.szydlow45.workers.dev/api/x402 -H 'content-t
 
 | Tool | What it does |
 |---|---|
+| `pay` | **Pay anything**: x402 invoices, Solana Pay, EIP-681, Bitcoin links, payment links or plain text, paid with any token. |
 | `fund_x402` | **Hit a 402 paywall?** Decode the x402 invoice and fund your wallet on the right chain from any chain. |
 | `get_quote` | Live cross-chain price, no addresses needed. Includes a **fair-price check** vs market rates. |
 | `quote_from_text` | Plain English: `"25 USDC on solana to ETH on base"` |

@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "1.7.1";
+const VERSION = "1.8.0";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -42,10 +42,11 @@ const DESCRIPTION =
   "Swap any token across 25+ blockchains (Bitcoin, Ethereum, Solana, Base, Arbitrum, BNB, Tron, " +
   "NEAR, Zcash, TON, Sui, XRP, Doge and more) in one call. Non-custodial, no API key, no wallet " +
   "connection: get a quote, receive a one-time deposit address, send funds, done. Powered by NEAR " +
-  "Intents solver network. Every quote is checked live against a competing network (proven best price). Automatic refund if a swap can't complete. Also: fund x402 (HTTP 402) payments " +
+  "Intents solver network. One `pay` tool handles any payment request (x402, Solana Pay, EIP-681, Bitcoin links, plain text). Every quote is checked live against a competing network (proven best price). Automatic refund if a swap can't complete. Also: fund x402 (HTTP 402) payments " +
   "from any chain, pay exact amounts, gas refuel, and 'pay me in any crypto' links.";
 
 const INSTRUCTIONS =
+  "Need to pay something? Pass ANY payment request (link, URI, 402 invoice, or plain text) to the pay tool. " +
   "Got an HTTP 402 / x402 'Payment Required' but your funds are on another chain? Pass the 402 response to fund_x402. " +
   "Tip: add referrer='<your NEAR account>' to any call to earn 1/3 of the fee on swaps you route. " +
   "To pay someone an exact amount with whatever you hold, use pay_exact. Out of gas on a chain? Use refuel_gas. " +
@@ -711,6 +712,131 @@ async function fundX402(c, a) {
   return out;
 }
 
+// ---- Universal pay: hand it ANY payment request, pay it with ANY token
+const EVM_BY_ID = Object.fromEntries(Object.entries(EVM).map(([k, v]) => [String(v), k]));
+function sciToUnits(v) {
+  // "2.014e18" or "1500000" -> BigInt string (base units)
+  const s = String(v).trim();
+  const m = s.match(/^(\d+)(?:\.(\d+))?(?:[eE]\+?(\d+))?$/);
+  if (!m) throw new UserError(`can't read amount '${v}'`);
+  const [, w, f = "", e = "0"] = m;
+  const exp = Number(e);
+  if (f.length > exp) throw new UserError(`amount '${v}' is not a whole number of base units`);
+  return BigInt(w + f.padEnd(exp, "0")).toString();
+}
+function guessChainFromAddress(addr) {
+  const a = String(addr || "");
+  if (/^0x[0-9a-fA-F]{40}$/.test(a)) return null; // EVM: chain must be stated
+  if (/^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}$/.test(a)) return "btc";
+  if (/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(a)) return "tron";
+  if (/\.near$/.test(a) || /^[0-9a-f]{64}$/.test(a)) return "near";
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(a)) return "sol";
+  return null;
+}
+async function tokenByContract(c, chain, contract) {
+  const all = await getTokens(c);
+  const evm = /^0x/i.test(contract);
+  return all.find((t) => t.blockchain === chain && t.contractAddress &&
+    (evm ? String(t.contractAddress).toLowerCase() === String(contract).toLowerCase() : t.contractAddress === contract)) || null;
+}
+// Returns { kind, to, token, chain, amount (human), label } or { kind: 'x402', payment_required }
+async function parsePaymentRequest(c, req) {
+  let r = req;
+  if (r && typeof r === "object") {
+    if (r.accepts || r.x402Version || r.payTo) return { kind: "x402", payment_required: r };
+    if (r.to || r.recipient) return { kind: "json", to: r.to || r.recipient, token: r.token, chain: r.chain, amount: r.amount != null ? String(r.amount) : null, label: r.label || r.memo || null };
+    throw new UserError("Couldn't understand the payment object. Pass {to, token, chain, amount}, a 402 body, a payment link or plain text.");
+  }
+  r = String(r || "").trim();
+  if (!r) throw new UserError("request is required: a payment link, URI, 402 invoice, or text like 'send 20 USDC to 0x... on base'");
+  // JSON / base64 x402
+  if (r.startsWith("{")) { try { return parsePaymentRequest(c, JSON.parse(r)); } catch (e) { if (e instanceof UserError) throw e; } }
+  if (/^[A-Za-z0-9+/=_-]{40,}$/.test(r) && !/^0x/.test(r)) {
+    try { const j = JSON.parse(atob(r.replace(/-/g, "+").replace(/_/g, "/"))); if (j && (j.accepts || j.x402Version)) return { kind: "x402", payment_required: j }; } catch { /* not base64 json */ }
+  }
+  // Swap Ripper (or compatible) payment link
+  if (/^https?:\/\//i.test(r)) {
+    let u; try { u = new URL(r); } catch { throw new UserError("That link isn't a valid URL."); }
+    const q = u.searchParams;
+    if (u.pathname.replace(/\/$/, "").endsWith("/pay") && q.get("to")) {
+      return { kind: "payment_link", to: q.get("to"), token: q.get("token"), chain: q.get("chain"), amount: q.get("amount"), label: q.get("label") };
+    }
+    throw new UserError("This link isn't a payment request I recognize. Supported: Swap Ripper /pay links, solana:, ethereum:, bitcoin: URIs, x402 invoices, or plain text.");
+  }
+  // Solana Pay: solana:<recipient>?amount=&spl-token=&label=
+  let m = r.match(/^solana:([1-9A-HJ-NP-Za-km-z]{32,44})(\?.*)?$/i);
+  if (m) {
+    const q = new URLSearchParams((m[2] || "").slice(1));
+    const mint = q.get("spl-token");
+    let token = "SOL";
+    if (mint) { const t = await tokenByContract(c, "sol", mint); if (!t) throw new UserError(`Solana token ${mint} isn't supported.`); token = t.assetId; }
+    return { kind: "solana_pay", to: m[1], token, chain: "sol", amount: q.get("amount"), label: q.get("label") || q.get("message") };
+  }
+  // EIP-681: ethereum:<addr>[@chainId][/transfer]?value=|address=&uint256=
+  m = r.match(/^ethereum:(?:pay-)?(0x[0-9a-fA-F]{40})(?:@(\d+))?(?:\/([a-zA-Z]+))?(\?.*)?$/i);
+  if (m) {
+    const [, target, cid = "1", fn, qs] = m;
+    const chain = EVM_BY_ID[cid];
+    if (!chain) throw new UserError(`EVM chain id ${cid} isn't supported. Supported: ${Object.entries(EVM).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+    const q = new URLSearchParams((qs || "").slice(1));
+    if (fn && fn.toLowerCase() === "transfer") {
+      const tok = await tokenByContract(c, chain, target);
+      if (!tok) throw new UserError(`Token ${target} on ${chain} isn't supported.`);
+      const to = q.get("address");
+      if (!to) throw new UserError("ERC-20 payment link is missing the recipient (address=...).");
+      const units = q.get("uint256");
+      return { kind: "eip681", to, token: tok.assetId, chain, amount: units ? fmtUnits(sciToUnits(units), tok.decimals) : null };
+    }
+    const all = await getTokens(c);
+    const nat = all.find((t) => t.blockchain === chain && String(t.symbol).toUpperCase() === NATIVE[chain] && !t.contractAddress);
+    if (!nat) throw new UserError(`Native ${NATIVE[chain]} on ${chain} isn't available.`);
+    const v = q.get("value");
+    return { kind: "eip681", to: target, token: nat.assetId, chain, amount: v ? fmtUnits(sciToUnits(v), nat.decimals) : null };
+  }
+  // BIP21: bitcoin:<addr>?amount=0.001
+  m = r.match(/^bitcoin:([a-zA-Z0-9]{25,90})(\?.*)?$/i);
+  if (m) {
+    const q = new URLSearchParams((m[2] || "").slice(1));
+    return { kind: "bip21", to: m[1], token: "BTC", chain: "btc", amount: q.get("amount"), label: q.get("label") || q.get("message") };
+  }
+  // Plain English: "send 20 USDC to 0xabc on base", "pay 0.01 BTC to bc1...", "20 USDC on base to 0x..."
+  m = r.match(/^(?:please\s+)?(?:send|pay|transfer|give)?\s*([\d.,]+)\s*\$?([A-Za-z0-9.]+)(?:\s+(?:on|@)\s+([A-Za-z][A-Za-z0-9 -]*?))?\s+to\s+(\S+)(?:\s+(?:on|@)\s+([A-Za-z][A-Za-z0-9 -]*?))?\s*[.!]?$/i);
+  if (m) {
+    const [, amt, sym, ch1, to, ch2] = m;
+    return { kind: "text", to, token: sym, chain: ch1 || ch2 || null, amount: amt.replace(/,/g, "") };
+  }
+  throw new UserError("Couldn't understand that payment request. Try: 'send 20 USDC to 0x... on base', a solana:/ethereum:/bitcoin: link, a Swap Ripper /pay link, or a 402 invoice.");
+}
+async function payAnything(c, a) {
+  const p = await parsePaymentRequest(c, a.request);
+  if (p.kind === "x402") {
+    const out = await fundX402(c, { ...a, payment_required: p.payment_required });
+    return { understood: { kind: "x402 invoice" }, ...out };
+  }
+  const chain = normChain(p.chain) || guessChainFromAddress(p.to);
+  if (!chain) throw new UserError(`Which chain is ${p.to} on? Add 'on base' (or ethereum, arbitrum, polygon, bsc...) to the request.`);
+  if (!p.token) throw new UserError("The request doesn't say which token to pay. Add the token, e.g. 'send 20 USDC to ...'.");
+  const dst = await resolveToken(c, p.token, chain);
+  const to = checkAddress(p.to, dst.blockchain, "recipient");
+  const understood = { kind: p.kind, pay_to: to, token: dst.symbol, chain: dst.blockchain, amount: p.amount || null, label: p.label || null };
+  if (!p.amount && !a.amount) return { understood, needs: "amount", message: "This request has no amount. Call pay again with amount='...'." };
+  const amount = String(a.amount || p.amount);
+  toUnits(amount, dst.decimals);
+  understood.amount = amount;
+  if (!a.pay_with_token) {
+    return { understood, message: "Got it. To pay, call pay again with pay_with_token (what you hold), pay_with_chain and refund_address (your address on that chain).",
+      tip: `If you already hold ${dst.symbol} on ${dst.blockchain}, just send ${amount} ${dst.symbol} to ${to} directly: no swap, no fee.` };
+  }
+  const src = await resolveToken(c, a.pay_with_token, a.pay_with_chain);
+  if (src.assetId === dst.assetId) {
+    return { understood, no_swap_needed: true, message: `You already hold ${dst.symbol} on ${dst.blockchain}. Send ${amount} ${dst.symbol} to ${to} directly: no swap, no fee.` };
+  }
+  const out = await payExact(c, { token: dst.assetId, amount_out: amount, pay_with_token: src.assetId, recipient: to,
+    refund_address: a.refund_address, slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed });
+  track(c, "pay_requests");
+  return { understood, ...out };
+}
+
 // ---- Payment links: humans or agents get paid exactly N tokens; payer uses any token
 async function createPaymentLink(c, a) {
   const dst = await resolveToken(c, a.token, a.chain);
@@ -917,6 +1043,24 @@ const ADDR_PROPS = {
 };
 
 const TOOLS = [
+  {
+    name: "pay",
+    title: "Pay anything: hand it any bill",
+    description: "One tool for any payment request. Pass whatever you were asked to pay: an x402 / HTTP 402 invoice, a Swap Ripper payment link, a Solana Pay link (solana:...), an Ethereum payment link (ethereum:..., EIP-681, any supported EVM chain), a Bitcoin link (bitcoin:...), plain text like 'send 20 USDC to 0xabc... on base', or {to, token, chain, amount}. Swap Ripper works out who gets what, then pays it EXACTLY using whatever token you hold on any chain. Call with only `request` to see what it understood; add pay_with_token, pay_with_chain and refund_address to get a deposit address.",
+    inputSchema: { type: "object", required: ["request"], properties: {
+      request: { description: "The payment request: link, URI, 402 body, plain text, or {to, token, chain, amount}.", anyOf: [{ type: "string" }, { type: "object" }] },
+      amount: { type: "string", description: "Only if the request has no amount: how much the recipient should get." },
+      pay_with_token: { type: "string", description: "Token you hold and will pay with, e.g. 'SOL', 'USDC', 'ETH'." },
+      pay_with_chain: { type: "string", description: "Chain you pay from, e.g. 'solana'." },
+      refund_address: { type: "string", description: "Your address on the paying chain, for automatic refunds." },
+      wallet: { type: "string", description: "x402 only: YOUR address on the invoice's network (your x402 client signs from it)." },
+      speed: SPEED,
+      slippage_bps: TOKEN_PROPS.slippage_bps,
+      referrer: REFERRER,
+    } },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    run: payAnything,
+  },
   {
     name: "get_quote",
     title: "Get a cross-chain swap quote",
@@ -1154,11 +1298,11 @@ async function handleRest(request, url, c) {
   if (request.method === "POST") {
     try { args = { ...args, ...(await request.json()) }; } catch { /* empty body ok */ }
   }
-  const map = { tokens: "search_tokens", chains: "list_chains", quote: "get_quote", swap: "create_swap", pay: "pay_exact", status: "get_swap_status", prices: "get_prices", compare: "compare_quotes", text: "quote_from_text", referrals: "referral_stats", link: "create_payment_link", gas: "refuel_gas", x402: "fund_x402" };
+  const map = { tokens: "search_tokens", chains: "list_chains", quote: "get_quote", swap: "create_swap", pay: "pay_exact", status: "get_swap_status", prices: "get_prices", compare: "compare_quotes", text: "quote_from_text", referrals: "referral_stats", link: "create_payment_link", gas: "refuel_gas", x402: "fund_x402", payany: "pay" };
   const tool = TOOL_MAP[map[route]];
   if (tool) track(c, `rest:${route}`);
   if (!tool) return json({ error: "Unknown endpoint", endpoints: Object.keys(map).map((k) => `/api/${k}`) }, 404);
-  if (["swap", "pay", "compare", "gas", "x402"].includes(route) && request.method !== "POST") return json({ error: `Use POST for /api/${route}` }, 405);
+  if (["swap", "pay", "compare", "gas", "x402", "payany"].includes(route) && request.method !== "POST") return json({ error: `Use POST for /api/${route}` }, 405);
   try { return json(await tool.run(c, args)); }
   catch (e) { return json({ error: e.message }, e instanceof UserError ? 400 : 502); }
 }
@@ -1180,6 +1324,7 @@ function openapi(origin) {
       "/api/swap": post("createSwap", "Create swap, get deposit address", t("create_swap")),
       "/api/pay": post("payExact", "Recipient gets an exact amount, paid with any token", t("pay_exact")),
       "/api/compare": post("compareQuotes", "Compare up to 10 routes", t("compare_quotes")),
+      "/api/payany": post("payAnything", "Pay ANY payment request (x402, Solana Pay, EIP-681, BIP21, payment link, plain text) with any token", t("pay")),
       "/api/x402": post("fundX402", "Decode an HTTP 402 (x402) invoice and fund your wallet on its chain from any chain", t("fund_x402")),
       "/api/status": { get: { operationId: "getSwapStatus", summary: "Swap status (optional long-poll)",
         parameters: [q("deposit_address", true), q("deposit_memo", false), q("wait_seconds", false, "0-25 server-side wait")], responses: { 200: { description: "Status" } } } },
@@ -1206,7 +1351,7 @@ function llmsTxt(origin, c) {
 
 ## Connect
 - MCP (Streamable HTTP, no auth): ${origin}/mcp
-- REST: ${origin}/api/{quote,text,swap,pay,x402,gas,link,compare,status,prices,tokens,chains,referrals}
+- REST: ${origin}/api/{payany,quote,text,swap,pay,x402,gas,link,compare,status,prices,tokens,chains,referrals}
 - OpenAPI: ${origin}/openapi.json
 - A2A agent card: ${origin}/.well-known/agent.json
 
@@ -1220,6 +1365,7 @@ ${INSTRUCTIONS}
 - Quote: GET ${origin}/api/quote?from_token=USDC&from_chain=solana&to_token=ETH&to_chain=base&amount=25
 - Swap: POST ${origin}/api/swap {"from_token":"USDC","from_chain":"solana","to_token":"ETH","to_chain":"base","amount":"25","recipient":"0x...","refund_address":"<solana address>","referrer":"myagent.near"}
 - Pay exactly 10 USDC on Base with SOL: POST ${origin}/api/pay {"token":"USDC","chain":"base","amount_out":"10","pay_with_token":"SOL","pay_with_chain":"solana","recipient":"0x...","refund_address":"<solana address>"}
+- Pay anything: POST ${origin}/api/payany {"request":"send 20 USDC to 0x... on base","pay_with_token":"SOL","pay_with_chain":"solana","refund_address":"<solana address>"} (also accepts solana:, ethereum:, bitcoin: links, payment links and 402 bodies)
 - Got HTTP 402 (x402)? Decode it: POST ${origin}/api/x402 {"payment_required": <the 402 body>}. Fund it from Solana: add "pay_with_token":"USDC","pay_with_chain":"solana","wallet":"0x<your base wallet>","refund_address":"<solana address>"
 - Track: GET ${origin}/api/status?deposit_address=...&wait_seconds=25
 
@@ -1275,6 +1421,7 @@ table{border-collapse:collapse;width:100%}td{padding:6px 8px;border-top:1px soli
 <h2>Connect in 10 seconds</h2><pre>${origin}/mcp</pre>
 <pre>{ "mcpServers": { "swap-ripper": { "url": "${origin}/mcp" } } }</pre>
 <h2>What agents can do</h2><table>${TOOLS.map((t) => `<tr><td><code>${t.name}</code></td><td>${t.description}</td></tr>`).join("")}</table>
+<h2>Pay anything</h2><p>Hand the <code>pay</code> tool any bill: an x402 invoice, a Solana Pay or Ethereum payment link, a Bitcoin link, a payment link, or just "send 20 USDC to 0x… on Base". It works out who gets what and pays it exactly with whatever you hold, on any chain.</p>
 <h2>Best price or fastest: your choice</h2><p>Default route: best price (usually 20-60s). Need it now? Pass <code>speed: "fast"</code> for fills in seconds. Every quote shows both.</p>
 <h2>Proven best price</h2><p>Every quote is checked live against Relay at the same moment, and the result is in the answer (<code>best_price_check</code>). No trust needed: agents see exactly how much more they get, or if going direct would be cheaper.</p>
 <h2>Got HTTP 402? Pay it from any chain</h2><p>x402 paywalls usually want USDC on Base, but your agent's money is on Solana, Ethereum or Bitcoin? Pass the 402 response to <code>fund_x402</code>. It reads the invoice and tops up your wallet on the right chain with an exact amount, paid with whatever you hold. Fund once (~$5) and dozens of future 402 calls need no swap.</p>
