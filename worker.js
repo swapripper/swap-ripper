@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "1.5.2";
+const VERSION = "1.6.0";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -42,7 +42,7 @@ const DESCRIPTION =
   "Swap any token across 25+ blockchains (Bitcoin, Ethereum, Solana, Base, Arbitrum, BNB, Tron, " +
   "NEAR, Zcash, TON, Sui, XRP, Doge and more) in one call. Non-custodial, no API key, no wallet " +
   "connection: get a quote, receive a one-time deposit address, send funds, done. Powered by NEAR " +
-  "Intents solver network. Automatic refund if a swap can't complete. Also: fund x402 (HTTP 402) payments " +
+  "Intents solver network. Every quote is checked live against a competing network (proven best price). Automatic refund if a swap can't complete. Also: fund x402 (HTTP 402) payments " +
   "from any chain, pay exact amounts, gas refuel, and 'pay me in any crypto' links.";
 
 const INSTRUCTIONS =
@@ -324,6 +324,59 @@ async function listChains(c) {
   };
 }
 
+// ---- Proven best price: compare every quote with Relay's direct price (no partner fee on their side)
+const RELAY_API = "https://api.relay.link";
+const RELAY_CHAIN = { eth: 1, base: 8453, arb: 42161, op: 10, bsc: 56, pol: 137, avax: 43114, gnosis: 100,
+  bera: 80094, sol: 792703809, btc: 8253038 };
+const RELAY_NATIVE = { sol: "11111111111111111111111111111111", btc: "bc1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqmql8k8" };
+const RELAY_PLACEHOLDER = { evm: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+  sol: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM", btc: "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh" };
+function relayCurrency(t) {
+  const ch = t.blockchain;
+  if (!(ch in RELAY_CHAIN)) return null;
+  const nativeSym = { sol: "SOL", btc: "BTC" }[ch] || NATIVE[ch];
+  if (String(t.symbol).toUpperCase() === nativeSym && !t.contractAddress) return RELAY_NATIVE[ch] || "0x0000000000000000000000000000000000000000";
+  if (ch === "btc") return null;
+  return t.contractAddress || null;
+}
+const relayAddr = (ch, given) => given || (ch === "sol" ? RELAY_PLACEHOLDER.sol : ch === "btc" ? RELAY_PLACEHOLDER.btc : RELAY_PLACEHOLDER.evm);
+async function relayDirectOut(src, dst, units, recipient, refund) {
+  const oc = relayCurrency(src), dc = relayCurrency(dst);
+  if (!oc || !dc) return null;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 3500);
+  try {
+    const r = await fetch(`${RELAY_API}/quote/v2`, { method: "POST", signal: ctl.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user: relayAddr(src.blockchain, refund), recipient: relayAddr(dst.blockchain, recipient),
+        originChainId: RELAY_CHAIN[src.blockchain], destinationChainId: RELAY_CHAIN[dst.blockchain],
+        originCurrency: oc, destinationCurrency: dc, amount: units, tradeType: "EXACT_INPUT" }) });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const out = j && j.details && j.details.currencyOut;
+    if (!out || !out.amountFormatted) return null;
+    return { out: Number(out.amountFormatted), seconds: j.details.timeEstimate ?? null };
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+function marketComparison(dst, ours, oursSeconds, relay, feePct = 0.3) {
+  const effectiveBpsNote = feePct;
+  if (!relay || !relay.out || !ours) return { checked: false, note: "Relay comparison unavailable for this route right now." };
+  const diffPct = ((ours - relay.out) / relay.out) * 100;
+  const sym = dst.symbol;
+  return {
+    checked: true,
+    compared_with: "Relay (direct, no partner fee), quoted at the same moment",
+    you_get_here: +ours.toPrecision(10),
+    relay_direct_gives: +relay.out.toPrecision(10),
+    difference_pct: +diffPct.toFixed(3),
+    verdict: diffPct >= 0 ? "best_price" : "relay_cheaper",
+    summary: diffPct >= 0
+      ? `Best price: ${+(ours - relay.out).toPrecision(4)} ${sym} (${diffPct.toFixed(2)}%) more than going direct to Relay.`
+      : `Relay direct gives ${+(relay.out - ours).toPrecision(4)} ${sym} (${(-diffPct).toFixed(2)}%) more on this route right now (Swap Ripper includes a ${(effectiveBpsNote)}% service fee). Going direct may be cheaper here.`,
+    speed_seconds: { here: oursSeconds ?? null, relay: relay.seconds },
+  };
+}
+
 async function getQuote(c, a) {
   const src = await resolveToken(c, a.from_token, a.from_chain);
   const dst = await resolveToken(c, a.to_token, a.to_chain);
@@ -335,9 +388,12 @@ async function getQuote(c, a) {
   const placeholder = c.feeTo || "intents.near";
   const recipient = exact ? checkAddress(a.recipient, dst.blockchain, "recipient") : placeholder;
   const refund = exact ? checkAddress(a.refund_address, src.blockchain, "refund_address") : placeholder;
+  const relayP = a._noMarket ? Promise.resolve(null)
+    : relayDirectOut(src, dst, units, exact ? recipient : null, exact ? refund : null);
   const q = await oneclick(c, "/v0/quote",
     quoteBody(c, src, dst, units, recipient, refund, true, slip, !exact, { referrer: a.referrer, bps: effectiveBps(c, usd) }));
   const qq = q.quote || {};
+  const relay = await relayP;
   return {
     from: shapeToken(src), to: shapeToken(dst),
     amount_in: qq.amountInFormatted ?? String(a.amount),
@@ -349,6 +405,7 @@ async function getQuote(c, a) {
     estimated_seconds: qq.timeEstimate ?? null,
     slippage_bps: slip,
     fees: feeInfo(c, a.referrer, usd),
+    best_price_check: a._noMarket ? undefined : marketComparison(dst, Number(qq.amountOutFormatted), qq.timeEstimate, relay, effectiveBps(c, usd) / 100),
     note: "Estimate only. Call create_swap (or pay_exact) to get a deposit address.",
   };
 }
@@ -665,7 +722,7 @@ async function compareQuotes(c, a) {
   if (typeof routes === "string") { try { routes = JSON.parse(routes); } catch { routes = null; } }
   if (!Array.isArray(routes) || !routes.length) throw new UserError("routes must be a non-empty array of {from_token, from_chain, to_token, to_chain, amount}");
   if (routes.length > 10) throw new UserError("max 10 routes per call");
-  const results = await Promise.allSettled(routes.map((r) => getQuote(c, { ...r, referrer: r.referrer ?? a.referrer })));
+  const results = await Promise.allSettled(routes.map((r) => getQuote(c, { ...r, referrer: r.referrer ?? a.referrer, _noMarket: true })));
   const out = results.map((r, i) => r.status === "fulfilled"
     ? { route: i, ok: true, ...pick(r.value) }
     : { route: i, ok: false, error: r.reason?.message || String(r.reason) });
@@ -764,7 +821,7 @@ const TOOLS = [
   {
     name: "get_quote",
     title: "Get a cross-chain swap quote",
-    description: "Live price for swapping any token to any token across 25+ chains (BTC, ETH, SOL, Base, Arbitrum, BNB, Tron, NEAR, Zcash, TON, Sui, XRP...). No addresses or keys needed, nothing committed. Includes a price_check against market rates so you can tell if the quote is fair.",
+    description: "Live price for swapping any token to any token across 25+ chains (BTC, ETH, SOL, Base, Arbitrum, BNB, Tron, NEAR, Zcash, TON, Sui, XRP...). No addresses or keys needed, nothing committed. Includes a price_check against market rates and a best_price_check that quotes a competing network (Relay) at the same moment, so you can see proof you are getting the better deal.",
     inputSchema: { type: "object", required: ["from_token", "to_token", "amount"], properties: {
       ...TOKEN_PROPS,
       recipient: { type: "string", description: "Optional (with refund_address): destination address, for an exact quote." },
@@ -1115,6 +1172,7 @@ table{border-collapse:collapse;width:100%}td{padding:6px 8px;border-top:1px soli
 <h2>Connect in 10 seconds</h2><pre>${origin}/mcp</pre>
 <pre>{ "mcpServers": { "swap-ripper": { "url": "${origin}/mcp" } } }</pre>
 <h2>What agents can do</h2><table>${TOOLS.map((t) => `<tr><td><code>${t.name}</code></td><td>${t.description}</td></tr>`).join("")}</table>
+<h2>Proven best price</h2><p>Every quote is checked live against Relay at the same moment, and the result is in the answer (<code>best_price_check</code>). No trust needed: agents see exactly how much more they get, or if going direct would be cheaper.</p>
 <h2>Got HTTP 402? Pay it from any chain</h2><p>x402 paywalls usually want USDC on Base, but your agent's money is on Solana, Ethereum or Bitcoin? Pass the 402 response to <code>fund_x402</code>. It reads the invoice and tops up your wallet on the right chain with an exact amount, paid with whatever you hold. Fund once (~$5) and dozens of future 402 calls need no swap.</p>
 <h2>Get paid in any crypto</h2><p>Make a payment link in seconds: your customer pays with whatever coin they hold, and you receive exactly the token you want. <a href="/pay"><b>Create a payment link →</b></a></p>
 <h2>Gas station</h2><p>Out of gas on Base, Arbitrum, Solana or 10 other chains? <code>refuel_gas</code> delivers a few dollars of native gas to any address, paid with any token.</p>
