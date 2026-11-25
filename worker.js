@@ -18,7 +18,11 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "3.6.0";
+const VERSION = "3.6.1";
+// Friendly message when the free storage tier's daily write limit is used up.
+const friendlyError = (e) => (e instanceof UserError ? e.message : /limit exceeded|KV put|429/i.test(String(e && e.message)) ?
+  "This feature needs to save data and today's storage limit is used up. It resets at 00:00 UTC. Quotes and payments without spending limits still work." :
+  "Temporary error on our side. Try again shortly.");
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 1000; // per payment, kept low while the service is new
@@ -3240,7 +3244,7 @@ async function handleRpc(msg, c) {
         const out = await tool.run(c, args);
         return ok({ content: [{ type: "text", text: JSON.stringify(out, null, 2) }], structuredContent: out, isError: false });
       } catch (e) {
-        const message = e instanceof UserError ? e.message : "Temporary error on our side. Try again shortly.";
+        const message = friendlyError(e);
         if (!(e instanceof UserError)) console.log("tool error", params.name, e && e.stack);
         return ok({ content: [{ type: "text", text: message }], isError: true });
       }
@@ -3287,7 +3291,7 @@ async function handleRest(request, url, c) {
     args.policy_id = c.policyId;
   }
   try { return json(await tool.run(c, args)); }
-  catch (e) { if (!(e instanceof UserError)) console.log("rest error", route, e && e.stack); return json({ error: e instanceof UserError ? e.message : "Temporary error on our side. Try again shortly." }, e instanceof UserError ? 400 : 502); }
+  catch (e) { if (!(e instanceof UserError)) console.log("rest error", route, e && e.stack); return json({ error: friendlyError(e) }, e instanceof UserError ? 400 : 502); }
 }
 
 function openapi(origin) {
