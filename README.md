@@ -39,6 +39,48 @@ claude mcp add --transport http swap-ripper https://swap-ripper.szydlow45.worker
 
 **No MCP?** Use the REST API ([OpenAPI spec](https://swap-ripper.szydlow45.workers.dev/openapi.json)) or point your agent at [llms.txt](https://swap-ripper.szydlow45.workers.dev/llms.txt).
 
+### Agent frameworks
+
+**ElizaOS** (via the official `@elizaos/plugin-mcp`), in your character file:
+```json
+{
+  "plugins": ["@elizaos/plugin-mcp"],
+  "settings": {
+    "mcp": { "servers": { "swap-ripper": { "type": "streamable-http", "url": "https://swap-ripper.szydlow45.workers.dev/mcp" } } }
+  }
+}
+```
+
+**LangChain / LangGraph** (`pip install langchain-mcp-adapters`):
+```python
+from langchain_mcp_adapters.client import MultiServerMCPClient
+client = MultiServerMCPClient({"swap-ripper": {"url": "https://swap-ripper.szydlow45.workers.dev/mcp", "transport": "streamable_http"}})
+tools = await client.get_tools()   # pass to your agent
+```
+
+**OpenAI Agents SDK** (`pip install openai-agents`):
+```python
+from agents import Agent, Runner
+from agents.mcp import MCPServerStreamableHttp
+async with MCPServerStreamableHttp(params={"url": "https://swap-ripper.szydlow45.workers.dev/mcp"}) as swap:
+    agent = Agent(name="trader", instructions="Use Swap Ripper for swaps and x402 funding.", mcp_servers=[swap])
+    print((await Runner.run(agent, "Quote 25 USDC on Solana to ETH on Base")).final_output)
+```
+
+**TypeScript (official MCP SDK)**:
+```ts
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+const client = new Client({ name: "my-agent", version: "1.0.0" });
+await client.connect(new StreamableHTTPClientTransport(new URL("https://swap-ripper.szydlow45.workers.dev/mcp")));
+const res = await client.callTool({ name: "fund_x402", arguments: { payment_required: the402Body } });
+```
+
+**Plain HTTP** (no MCP at all):
+```bash
+curl -s -X POST https://swap-ripper.szydlow45.workers.dev/api/x402 -H 'content-type: application/json' -d '{"payment_required": <the 402 body>}'
+```
+
 ## Tools
 
 | Tool | What it does |
