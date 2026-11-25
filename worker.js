@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "1.6.1";
+const VERSION = "1.7.0";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -79,6 +79,8 @@ function cfg(env) {
     feeTo: String(env.FEE_RECIPIENT || "").trim().toLowerCase(),
     feeBps: Number.parseInt(env.FEE_BPS || "30", 10),
     kv: env.STATS || null, // optional Workers KV binding for referral stats
+    relayKey: env.RELAY_API_KEY || "",
+    relayFeeTo: String(env.RELAY_FEE_TO || "").trim().toLowerCase(),
     origin: "",
   };
 }
@@ -382,6 +384,79 @@ function marketComparison(dst, ours, oursSeconds, relay, feePct = 0.3) {
   };
 }
 
+// ---- Fast mode: route through Relay (~1-5s fills) with the same service fee, paid to RELAY_FEE_TO
+const fastEnabled = (c) => !!c.relayKey && /^0x[0-9a-f]{40}$/.test(c.relayFeeTo);
+async function relayCall(c, path, init = {}) {
+  const r = await fetchRetry(`${RELAY_API}${path}`, { ...init,
+    headers: { "Content-Type": "application/json", "x-api-key": c.relayKey, ...(init.headers || {}) } });
+  const t = await r.text();
+  let j; try { j = JSON.parse(t); } catch { j = { message: t }; }
+  if (!r.ok) throw new UserError(`fast network: ${j.message || r.status}`);
+  return j;
+}
+async function fastSwap(c, a, src, dst, units, recipient, refund, exactOutput, bps) {
+  if (!fastEnabled(c)) throw new UserError("Fast mode isn't available right now. Leave out speed='fast' to use the best-price route.");
+  const oc = relayCurrency(src), dc = relayCurrency(dst);
+  if (!oc || !dc) throw new UserError(`Fast mode doesn't support ${src.symbol}@${src.blockchain} -> ${dst.symbol}@${dst.blockchain}. Leave out speed='fast' to use the best-price route.`);
+  const body = { user: refund, recipient, originChainId: RELAY_CHAIN[src.blockchain], destinationChainId: RELAY_CHAIN[dst.blockchain],
+    originCurrency: oc, destinationCurrency: dc, amount: units, tradeType: exactOutput ? "EXACT_OUTPUT" : "EXACT_INPUT",
+    useDepositAddress: true, strict: true, refundTo: refund, appFees: [{ recipient: c.relayFeeTo, fee: String(bps) }] };
+  if (a.slippage_bps) body.slippageTolerance = String(clampSlip(a.slippage_bps));
+  const j = await relayCall(c, "/quote/v2", { method: "POST", body: JSON.stringify(body) });
+  const step = (j.steps || []).find((x) => x.depositAddress) || {};
+  const dep = step.depositAddress;
+  const d = j.details || {};
+  const cin = d.currencyIn || {}, cout = d.currencyOut || {};
+  if (!dep || !cin.amountFormatted) throw new UserError("the fast network did not return a deposit address; try again or leave out speed='fast'");
+  return { depositAddress: dep, requestId: step.requestId || j.requestId || null,
+    amountIn: cin.amount, amountInFormatted: cin.amountFormatted, amountInUsd: cin.amountUsd,
+    amountOutFormatted: cout.amountFormatted, amountOutUsd: cout.amountUsd ?? null,
+    minAmountOut: cout.minimumAmount ?? null, timeEstimate: d.timeEstimate ?? null };
+}
+function fastReply(c, a, src, dst, f, recipient, refund) {
+  return {
+    status: "AWAITING_DEPOSIT",
+    route: "fast",
+    deposit_address: f.depositAddress,
+    deposit_memo: null,
+    deposit_chain: src.blockchain,
+    send_exactly: f.amountInFormatted,
+    send_token: shapeToken(src),
+    deadline: null,
+    deposit_tx: depositTx(src, f.depositAddress, f.amountIn),
+    estimated_amount_out: f.amountOutFormatted,
+    estimated_amount_out_usd: f.amountOutUsd,
+    minimum_amount_out: f.minAmountOut ? fmtUnits(f.minAmountOut, dst.decimals) : null,
+    receive_token: shapeToken(dst),
+    recipient, refund_address: refund,
+    price_check: fairness(src, dst, f.amountInFormatted, f.amountOutFormatted),
+    estimated_seconds: f.timeEstimate,
+    fees: feeInfo(c, null, Number(f.amountInUsd) || usdOf(src, f.amountInFormatted)),
+    next_steps: [
+      `Send exactly ${f.amountInFormatted} ${src.symbol} on ${src.blockchain} to ${f.depositAddress}. Send it soon: fast quotes are short-lived.` +
+        (EVM[src.blockchain] ? " deposit_tx is a ready-to-sign transaction for EVM wallets." : ""),
+      "Then call get_swap_status with this deposit_address, route='fast' and wait_seconds=25 until final=true.",
+      "If anything fails, funds are refunded to refund_address automatically.",
+    ],
+  };
+}
+async function fetchFastStatus(c, a) {
+  const j = await relayCall(c, `/requests/v3?${new URLSearchParams({ depositAddress: a.deposit_address, limit: "1" })}`);
+  const q = (j.requests || [])[0];
+  if (!q) return { status: "PENDING_DEPOSIT", route: "fast", final: false, meaning: STATUS_TEXT.PENDING_DEPOSIT };
+  const map = { waiting: "PENDING_DEPOSIT", depositing: "KNOWN_DEPOSIT_TX", pending: "PROCESSING", submitted: "PROCESSING",
+    success: "SUCCESS", refund: "REFUNDED", failure: "FAILED" };
+  const st = map[q.status] || String(q.status || "PROCESSING").toUpperCase();
+  const final = ["SUCCESS", "REFUNDED", "FAILED"].includes(st);
+  if (st === "SUCCESS" && c.kv) {
+    try { const k = `done:${a.deposit_address}`; if (!(await c.kv.get(k))) { await c.kv.put(k, "1"); track(c, "swaps_completed"); } } catch { /* ignore */ }
+  }
+  const dd = q.data || {};
+  return { status: st, route: "fast", final, meaning: STATUS_TEXT[st] || "",
+    origin_tx: (dd.inTxs || []).map((x) => x.txHash), destination_tx: (dd.outTxs || []).map((x) => x.txHash),
+    fail_reason: dd.failReason || null, updated_at: q.updatedAt ?? null };
+}
+
 async function getQuote(c, a) {
   const src = await resolveToken(c, a.from_token, a.from_chain);
   const dst = await resolveToken(c, a.to_token, a.to_chain);
@@ -411,6 +486,11 @@ async function getQuote(c, a) {
     slippage_bps: slip,
     fees: feeInfo(c, a.referrer, usd),
     best_price_check: a._noMarket ? undefined : marketComparison(dst, Number(qq.amountOutFormatted), qq.timeEstimate, relay, effectiveBps(c, usd) / 100),
+    fast_option: (!a._noMarket && fastEnabled(c) && relay && relay.out) ? {
+      estimated_amount_out: +(relay.out * (1 - effectiveBps(c, usd) / 10000)).toPrecision(10),
+      estimated_seconds: relay.seconds,
+      how: "Pass speed='fast' to create_swap or pay_exact for a ~seconds fill (usually slightly less output than the best-price route).",
+    } : undefined,
     note: "Estimate only. Call create_swap (or pay_exact) to get a deposit address.",
   };
 }
@@ -464,6 +544,11 @@ async function createSwap(c, a) {
   const slip = clampSlip(a.slippage_bps);
   const recipient = checkAddress(a.recipient, dst.blockchain, "recipient");
   const refund = checkAddress(a.refund_address, src.blockchain, "refund_address");
+  if (String(a.speed || "").toLowerCase() === "fast") {
+    const f = await fastSwap(c, a, src, dst, units, recipient, refund, false, effectiveBps(c, usd));
+    await recordSwap(c, null, Number(f.amountInUsd) || usd); track(c, "fast_swaps");
+    return fastReply(c, a, src, dst, f, recipient, refund);
+  }
   const q = await oneclick(c, "/v0/quote",
     quoteBody(c, src, dst, units, recipient, refund, false, slip, false, { referrer: a.referrer, bps: effectiveBps(c, usd) }));
   const qq = q.quote || {};
@@ -484,6 +569,13 @@ async function payExact(c, a) {
   const slip = clampSlip(a.slippage_bps);
   const recipient = checkAddress(a.recipient, dst.blockchain, "recipient");
   const refund = checkAddress(a.refund_address, src.blockchain, "refund_address");
+  if (String(a.speed || "").toLowerCase() === "fast") {
+    const f = await fastSwap(c, a, src, dst, units, recipient, refund, true, effectiveBps(c, usd));
+    await recordSwap(c, null, Number(f.amountInUsd) || usd); track(c, "fast_swaps");
+    const out = fastReply(c, a, src, dst, f, recipient, refund);
+    out.recipient_receives_exactly = `${a.amount_out} ${dst.symbol} on ${dst.blockchain}`;
+    return out;
+  }
   const q = await oneclick(c, "/v0/quote",
     quoteBody(c, src, dst, units, recipient, refund, false, slip, false, { referrer: a.referrer, exactOutput: true, bps: effectiveBps(c, usd) }));
   const qq = q.quote || {};
@@ -510,7 +602,7 @@ async function refuelGas(c, a) {
   const amt = (usd / Number(native.price)).toFixed(Math.min(native.decimals, 8)).replace(/0+$/, "").replace(/\.$/, "");
   const out = await payExact(c, { token: sym, chain, amount_out: amt, pay_with_token: a.pay_with_token,
     pay_with_chain: a.pay_with_chain, recipient: a.recipient, refund_address: a.refund_address,
-    slippage_bps: a.slippage_bps, referrer: a.referrer });
+    slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed });
   out.gas = { chain, token: sym, amount: amt, approx_usd: usd };
   return out;
 }
@@ -611,7 +703,7 @@ async function fundX402(c, a) {
   }
   const out = await payExact(c, { token: tok.assetId, amount_out: target_str, pay_with_token: a.pay_with_token,
     pay_with_chain: a.pay_with_chain, recipient: a.wallet, refund_address: a.refund_address,
-    slippage_bps: a.slippage_bps, referrer: a.referrer });
+    slippage_bps: a.slippage_bps, referrer: a.referrer, speed: a.speed });
   track(c, "x402_funds");
   out.invoice = invoice;
   out.why = why;
@@ -757,6 +849,7 @@ async function swapStatus(c, a) {
 }
 
 async function fetchStatus(c, a) {
+  if (String(a.route || "").toLowerCase() === "fast") return fetchFastStatus(c, a);
   const p = new URLSearchParams({ depositAddress: a.deposit_address });
   if (a.deposit_memo) p.set("depositMemo", a.deposit_memo);
   const r = await fetchRetry(`${API}/v0/status?${p}`, { headers: headers(c) });
@@ -808,6 +901,7 @@ function fmtUnits(units, decimals) {
 
 // ------------------------------------------------------------------ MCP tool definitions
 const REFERRER = { type: "string", description: "Optional: your NEAR account (e.g. 'myagent.near'). You earn 1/3 of the service fee on every swap routed with it. The user pays the same." };
+const SPEED = { type: "string", enum: ["best_price", "fast"], description: "Optional. 'best_price' (default, ~20-60s, usually the most output) or 'fast' (~seconds via Relay, usually slightly less output). get_quote shows both in best_price_check/fast_option." };
 const TOKEN_PROPS = {
   from_token: { type: "string", description: "Token to send: symbol ('USDC', 'ETH', 'BTC'), 'SYMBOL@chain', 'SYMBOL on chain', or an asset_id from search_tokens." },
   from_chain: { type: "string", description: "Chain the token is sent from, e.g. 'solana', 'base', 'ethereum', 'bitcoin'. Needed when the symbol exists on several chains." },
@@ -839,7 +933,7 @@ const TOOLS = [
     name: "create_swap",
     title: "Swap tokens across chains",
     description: "Lock a quote and get a one-time deposit address. Send exactly `send_exactly` of the source token there and the output lands at `recipient` automatically, usually in under a minute. Non-custodial, no API key, no wallet connection, automatic refund on failure. For EVM sources, `deposit_tx` is a ready-to-sign transaction.",
-    inputSchema: { type: "object", required: ["from_token", "to_token", "amount", "recipient", "refund_address"], properties: { ...TOKEN_PROPS, ...ADDR_PROPS } },
+    inputSchema: { type: "object", required: ["from_token", "to_token", "amount", "recipient", "refund_address"], properties: { ...TOKEN_PROPS, ...ADDR_PROPS, speed: SPEED } },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     run: createSwap,
   },
@@ -855,6 +949,7 @@ const TOOLS = [
       pay_with_chain: { type: "string", description: "Chain you pay from, e.g. 'solana'." },
       slippage_bps: TOKEN_PROPS.slippage_bps,
       ...ADDR_PROPS,
+      speed: SPEED,
       referrer: REFERRER,
     } },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -873,6 +968,7 @@ const TOOLS = [
       top_up_usd: { type: "number", description: "Minimum top-up in USD (1-500, default 5). The invoice amount is used if larger." },
       prefer_network: { type: "string", description: "Optional: which of the invoice's networks to fund, e.g. 'base' or 'solana'." },
       slippage_bps: TOKEN_PROPS.slippage_bps,
+      speed: SPEED,
       referrer: REFERRER,
     } },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -905,6 +1001,7 @@ const TOOLS = [
       pay_with_chain: { type: "string", description: "Chain you pay from, e.g. 'solana'." },
       refund_address: { type: "string", description: "Your address on the paying chain, for automatic refunds." },
       slippage_bps: TOKEN_PROPS.slippage_bps,
+      speed: SPEED,
       referrer: REFERRER,
     } },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -937,6 +1034,7 @@ const TOOLS = [
       deposit_address: { type: "string", description: "deposit_address returned by create_swap or pay_exact." },
       deposit_memo: { type: "string", description: "deposit_memo, if one was returned." },
       wait_seconds: { type: "integer", description: "0-25. Server-side wait for a status change (long-poll)." },
+      route: { type: "string", enum: ["best_price", "fast"], description: "Pass 'fast' if the swap was created with speed='fast' (the reply says route='fast')." },
     } },
     annotations: { readOnlyHint: true, openWorldHint: true },
     run: swapStatus,
@@ -1177,6 +1275,7 @@ table{border-collapse:collapse;width:100%}td{padding:6px 8px;border-top:1px soli
 <h2>Connect in 10 seconds</h2><pre>${origin}/mcp</pre>
 <pre>{ "mcpServers": { "swap-ripper": { "url": "${origin}/mcp" } } }</pre>
 <h2>What agents can do</h2><table>${TOOLS.map((t) => `<tr><td><code>${t.name}</code></td><td>${t.description}</td></tr>`).join("")}</table>
+<h2>Best price or fastest: your choice</h2><p>Default route: best price (usually 20-60s). Need it now? Pass <code>speed: "fast"</code> for fills in seconds. Every quote shows both.</p>
 <h2>Proven best price</h2><p>Every quote is checked live against Relay at the same moment, and the result is in the answer (<code>best_price_check</code>). No trust needed: agents see exactly how much more they get, or if going direct would be cheaper.</p>
 <h2>Got HTTP 402? Pay it from any chain</h2><p>x402 paywalls usually want USDC on Base, but your agent's money is on Solana, Ethereum or Bitcoin? Pass the 402 response to <code>fund_x402</code>. It reads the invoice and tops up your wallet on the right chain with an exact amount, paid with whatever you hold. Fund once (~$5) and dozens of future 402 calls need no swap.</p>
 <h2>Get paid in any crypto</h2><p>Make a payment link in seconds: your customer pays with whatever coin they hold, and you receive exactly the token you want. <a href="/pay"><b>Create a payment link →</b></a></p>
