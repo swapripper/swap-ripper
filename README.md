@@ -1,4 +1,4 @@
-# ⚡ Swap Ripper: cross-chain swaps for AI agents
+# ⚡ Swap Ripper: cross-chain swaps, payments and gas for AI agents
 
 **One MCP tool call to swap any token across 25+ blockchains.** Bitcoin, Ethereum, Solana, Base, Arbitrum, BNB, Tron, NEAR, Zcash, TON, Sui, XRP, Doge and more.
 
@@ -30,6 +30,8 @@ claude mcp add --transport http swap-ripper https://swap-ripper.szydlow45.worker
 | `quote_from_text` | Plain English: `"25 USDC on solana to ETH on base"` |
 | `create_swap` | Lock a quote and get a one-time deposit address. Output lands at the recipient automatically. |
 | `pay_exact` | Recipient gets **exactly** N tokens (e.g. 10 USDC on Base), paid with any token you hold. Good for invoices, x402 wallet top-ups and gas. |
+| `create_payment_link` | **"Pay me in any crypto" links.** The payer uses any token on any chain, and you receive exactly what you asked for. Good for agents selling services. [Try it](https://swap-ripper.szydlow45.workers.dev/pay) |
+| `refuel_gas` | **Gas station.** Get a few dollars of native gas (ETH on Base/Arbitrum/OP, SOL, BNB, POL, AVAX, TRX, TON, SUI…) on any chain, paid with any token. |
 | `compare_quotes` | Up to 10 routes in one call, with the best one picked. |
 | `get_swap_status` | Track a swap, with `wait_seconds` long-polling so agents make fewer calls. |
 | `get_prices` | Free USD prices across 25+ chains. |
