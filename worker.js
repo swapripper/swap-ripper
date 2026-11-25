@@ -18,7 +18,7 @@
  *   ONECLICK_JWT    your partners.near-intents.org key          (SECRET, encrypt it)
  */
 
-const VERSION = "1.4.1";
+const VERSION = "1.5.0";
 const NAME = "swap-ripper";
 const API = "https://1click.chaindefuser.com";
 const MAX_USD = 25000;
@@ -42,9 +42,11 @@ const DESCRIPTION =
   "Swap any token across 25+ blockchains (Bitcoin, Ethereum, Solana, Base, Arbitrum, BNB, Tron, " +
   "NEAR, Zcash, TON, Sui, XRP, Doge and more) in one call. Non-custodial, no API key, no wallet " +
   "connection: get a quote, receive a one-time deposit address, send funds, done. Powered by NEAR " +
-  "Intents solver network. Automatic refund if a swap can't complete.";
+  "Intents solver network. Automatic refund if a swap can't complete. Also: fund x402 (HTTP 402) payments " +
+  "from any chain, pay exact amounts, gas refuel, and 'pay me in any crypto' links.";
 
 const INSTRUCTIONS =
+  "Got an HTTP 402 / x402 'Payment Required' but your funds are on another chain? Pass the 402 response to fund_x402. " +
   "Tip: add referrer='<your NEAR account>' to any call to earn 1/3 of the fee on swaps you route. " +
   "To pay someone an exact amount with whatever you hold, use pay_exact. Out of gas on a chain? Use refuel_gas. " +
   "To get paid by humans or other agents, use create_payment_link. " +
@@ -451,6 +453,109 @@ async function refuelGas(c, a) {
   return out;
 }
 
+// ---- x402: read a "402 Payment Required" invoice and fund the agent's wallet on the right chain
+const X402_NET = {
+  base: "base", ethereum: "eth", mainnet: "eth", arbitrum: "arb", "arbitrum-one": "arb", optimism: "op",
+  polygon: "pol", avalanche: "avax", bsc: "bsc", gnosis: "gnosis", berachain: "bera", solana: "sol",
+  "solana-mainnet": "sol", "eip155:8453": "base", "eip155:1": "eth", "eip155:42161": "arb", "eip155:10": "op",
+  "eip155:137": "pol", "eip155:43114": "avax", "eip155:56": "bsc", "eip155:100": "gnosis", "eip155:80094": "bera",
+  "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": "sol",
+};
+const X402_TESTNET = /sepolia|fuji|amoy|devnet|testnet|eip155:84532|eip155:11155111|eip155:43113|eip155:80002|solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1/i;
+function parsePaymentRequired(input) {
+  let v = input;
+  if (typeof v === "string") {
+    const s = v.trim();
+    try { v = JSON.parse(s); } catch {
+      try { v = JSON.parse(atob(s.replace(/-/g, "+").replace(/_/g, "/"))); } catch {
+        throw new UserError("payment_required must be the 402 response body (JSON), or the base64 PAYMENT-REQUIRED header value.");
+      }
+    }
+  }
+  if (Array.isArray(v)) v = { accepts: v };
+  if (v && !v.accepts && (v.payTo || v.pay_to)) v = { accepts: [v] };
+  const accepts = (v && Array.isArray(v.accepts) ? v.accepts : []).map((e) => ({
+    scheme: e.scheme || "exact",
+    network: String(e.network || ""),
+    asset: String(e.asset || e.token || ""),
+    amount: String(e.maxAmountRequired ?? e.amount ?? e.price ?? ""),
+    pay_to: e.payTo || e.pay_to || null,
+    description: e.description || (v.resource && v.resource.description) || null,
+    resource: (typeof e.resource === "string" ? e.resource : null) || (v.resource && v.resource.url) || null,
+  }));
+  if (!accepts.length) throw new UserError("No payment options found. Pass the full 402 body (it has an 'accepts' list).");
+  return { version: v.x402Version ?? null, accepts };
+}
+async function resolveX402(c, e) {
+  if (X402_TESTNET.test(e.network)) return { ...e, ok: false, why: "testnet: test tokens are free from a faucet, nothing to buy" };
+  const chain = X402_NET[e.network.toLowerCase()] || X402_NET[e.network];
+  if (!chain) return { ...e, ok: false, why: `network '${e.network}' not supported` };
+  const all = await getTokens(c);
+  const evm = /^0x/i.test(e.asset);
+  const tok = all.find((t) => t.blockchain === chain && t.contractAddress &&
+    (evm ? String(t.contractAddress).toLowerCase() === e.asset.toLowerCase() : t.contractAddress === e.asset));
+  if (!tok) return { ...e, chain, ok: false, why: `token ${e.asset} on ${chain} not supported` };
+  if (!/^\d+$/.test(e.amount)) return { ...e, chain, ok: false, why: "invalid amount" };
+  return { ...e, chain, token: tok, ok: true, amount_human: fmtUnits(e.amount, tok.decimals) };
+}
+async function fundX402(c, a) {
+  const pr = parsePaymentRequired(a.payment_required);
+  const opts = await Promise.all(pr.accepts.map((e) => resolveX402(c, e)));
+  const usable = opts.filter((o) => o.ok);
+  const summary = opts.map((o) => ({ network: o.network, chain: o.chain || null, token: o.token ? o.token.symbol : o.asset,
+    amount: o.amount_human || o.amount, pay_to: o.pay_to, supported: o.ok, reason: o.ok ? undefined : o.why }));
+  if (!usable.length) throw new UserError("None of this invoice's payment options can be funded: " +
+    summary.map((s) => `${s.network}: ${s.reason}`).join("; "));
+  const want = normChain(a.prefer_network ? (X402_NET[String(a.prefer_network).toLowerCase()] || a.prefer_network) : null);
+  const holdChain = normChain(a.pay_with_chain);
+  const pick = usable.find((o) => want && o.chain === want) || usable.find((o) => o.chain === holdChain) ||
+    usable.find((o) => o.chain === "base") || usable[0];
+  const tok = pick.token;
+  const price = Number(tok.price || 0);
+  // Fund a small balance once (default ~$5) so many future 402 payments need no swap at all.
+  const minUsd = Math.min(Math.max(Number(a.top_up_usd) || 5, 1), 500);
+  const need = Number(pick.amount_human);
+  let target = need;
+  if (price && need * price < minUsd) target = minUsd / price;
+  const target_str = target.toFixed(Math.min(tok.decimals, 6)).replace(/0+$/, "").replace(/\.$/, "");
+  const invoice = {
+    pays_for: pick.description || pick.resource || null,
+    network: pick.network, chain: pick.chain, token: shapeToken(tok),
+    required_per_call: pick.amount_human, merchant_pay_to: pick.pay_to, scheme: pick.scheme,
+    top_up_amount: target_str,
+    covers_about: need > 0 ? Math.floor(target / need) + " calls at this price" : null,
+    all_options: summary,
+  };
+  const why = "x402 payments are signed by YOUR wallet on the invoice's chain, so Swap Ripper tops up your wallet there " +
+    "(exact amount, from any token on any chain). Then your x402 client pays the invoice as normal.";
+  if (holdChain === pick.chain && a.pay_with_token &&
+      String(a.pay_with_token).toUpperCase() === String(tok.symbol).toUpperCase()) {
+    return { invoice, no_swap_needed: true, message: `You already hold ${tok.symbol} on ${pick.chain}. Pay the invoice directly with your x402 client.` };
+  }
+  if (!a.pay_with_token || !a.wallet || !a.refund_address) {
+    let estimate = null;
+    if (a.pay_with_token) {
+      try {
+        const q = await getQuote(c, { from_token: a.pay_with_token, from_chain: a.pay_with_chain, to_token: tok.assetId,
+          amount: "1", referrer: a.referrer });
+        const rate = Number(q.estimated_amount_out) || 0;
+        if (rate) estimate = { pay_about: +(target / rate * 1.01).toPrecision(6), pay_token: q.from.symbol, pay_chain: q.from.chain };
+      } catch { /* estimate is best-effort */ }
+    }
+    return { invoice, why, estimate,
+      next_step: "Call fund_x402 again with pay_with_token, pay_with_chain, wallet (your address on " + pick.chain +
+        ") and refund_address (your address on the chain you pay from) to get a deposit address." };
+  }
+  const out = await payExact(c, { token: tok.assetId, amount_out: target_str, pay_with_token: a.pay_with_token,
+    pay_with_chain: a.pay_with_chain, recipient: a.wallet, refund_address: a.refund_address,
+    slippage_bps: a.slippage_bps, referrer: a.referrer });
+  track(c, "x402_funds");
+  out.invoice = invoice;
+  out.why = why;
+  out.next_steps.push(`When get_swap_status says SUCCESS, your wallet ${a.wallet} holds ${target_str} ${tok.symbol} on ${pick.chain}: retry the original request and let your x402 client pay.`);
+  return out;
+}
+
 // ---- Payment links: humans or agents get paid exactly N tokens; payer uses any token
 async function createPaymentLink(c, a) {
   const dst = await resolveToken(c, a.token, a.chain);
@@ -693,6 +798,24 @@ const TOOLS = [
     run: payExact,
   },
   {
+    name: "fund_x402",
+    title: "Got HTTP 402? Fund your x402 wallet from any chain",
+    description: "Hit a '402 Payment Required' (x402) paywall but your funds are on another chain or token? Paste the 402 response (body JSON or base64 PAYMENT-REQUIRED header, x402 v1 or v2). Swap Ripper reads the invoice, picks the right network and token (e.g. USDC on Base), and tops up YOUR wallet there with an exact amount, paid from any token on any chain (SOL, ETH, BTC, USDC on Solana...). Default top-up ~$5 so dozens of future 402 calls need no swap. Call with only payment_required to decode the invoice and see options; add pay_with_token, wallet and refund_address to get a deposit address.",
+    inputSchema: { type: "object", required: ["payment_required"], properties: {
+      payment_required: { description: "The 402 response body (object or JSON string) or the base64 PAYMENT-REQUIRED header value.", anyOf: [{ type: "string" }, { type: "object" }] },
+      wallet: { type: "string", description: "YOUR address on the invoice's network (the wallet your x402 client signs with)." },
+      pay_with_token: { type: "string", description: "Token you hold and will pay with, e.g. 'SOL' or 'USDC'." },
+      pay_with_chain: { type: "string", description: "Chain you pay from, e.g. 'solana'." },
+      refund_address: { type: "string", description: "Your address on the paying chain, for automatic refunds." },
+      top_up_usd: { type: "number", description: "Minimum top-up in USD (1-500, default 5). The invoice amount is used if larger." },
+      prefer_network: { type: "string", description: "Optional: which of the invoice's networks to fund, e.g. 'base' or 'solana'." },
+      slippage_bps: TOKEN_PROPS.slippage_bps,
+      referrer: REFERRER,
+    } },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    run: fundX402,
+  },
+  {
     name: "create_payment_link",
     title: "Create a 'pay me in any crypto' link",
     description: "Create a shareable payment link (like an invoice). The payer can pay with ANY token on ANY chain; the recipient receives exactly the token you choose (e.g. 50 USDC on Base). Great for agents that sell services to humans or other agents. No account needed.",
@@ -870,11 +993,11 @@ async function handleRest(request, url, c) {
   if (request.method === "POST") {
     try { args = { ...args, ...(await request.json()) }; } catch { /* empty body ok */ }
   }
-  const map = { tokens: "search_tokens", chains: "list_chains", quote: "get_quote", swap: "create_swap", pay: "pay_exact", status: "get_swap_status", prices: "get_prices", compare: "compare_quotes", text: "quote_from_text", referrals: "referral_stats", link: "create_payment_link", gas: "refuel_gas" };
+  const map = { tokens: "search_tokens", chains: "list_chains", quote: "get_quote", swap: "create_swap", pay: "pay_exact", status: "get_swap_status", prices: "get_prices", compare: "compare_quotes", text: "quote_from_text", referrals: "referral_stats", link: "create_payment_link", gas: "refuel_gas", x402: "fund_x402" };
   const tool = TOOL_MAP[map[route]];
   if (tool) track(c, `rest:${route}`);
   if (!tool) return json({ error: "Unknown endpoint", endpoints: Object.keys(map).map((k) => `/api/${k}`) }, 404);
-  if (["swap", "pay", "compare", "gas"].includes(route) && request.method !== "POST") return json({ error: `Use POST for /api/${route}` }, 405);
+  if (["swap", "pay", "compare", "gas", "x402"].includes(route) && request.method !== "POST") return json({ error: `Use POST for /api/${route}` }, 405);
   try { return json(await tool.run(c, args)); }
   catch (e) { return json({ error: e.message }, e instanceof UserError ? 400 : 502); }
 }
@@ -896,6 +1019,7 @@ function openapi(origin) {
       "/api/swap": post("createSwap", "Create swap, get deposit address", t("create_swap")),
       "/api/pay": post("payExact", "Recipient gets an exact amount, paid with any token", t("pay_exact")),
       "/api/compare": post("compareQuotes", "Compare up to 10 routes", t("compare_quotes")),
+      "/api/x402": post("fundX402", "Decode an HTTP 402 (x402) invoice and fund your wallet on its chain from any chain", t("fund_x402")),
       "/api/status": { get: { operationId: "getSwapStatus", summary: "Swap status (optional long-poll)",
         parameters: [q("deposit_address", true), q("deposit_memo", false), q("wait_seconds", false, "0-25 server-side wait")], responses: { 200: { description: "Status" } } } },
       "/api/prices": { get: { operationId: "getPrices", summary: "Free multi-chain token prices",
@@ -921,7 +1045,7 @@ function llmsTxt(origin, c) {
 
 ## Connect
 - MCP (Streamable HTTP, no auth): ${origin}/mcp
-- REST: ${origin}/api/{quote,text,swap,pay,compare,status,prices,tokens,chains,referrals}
+- REST: ${origin}/api/{quote,text,swap,pay,x402,gas,link,compare,status,prices,tokens,chains,referrals}
 - OpenAPI: ${origin}/openapi.json
 - A2A agent card: ${origin}/.well-known/agent.json
 
@@ -935,6 +1059,7 @@ ${INSTRUCTIONS}
 - Quote: GET ${origin}/api/quote?from_token=USDC&from_chain=solana&to_token=ETH&to_chain=base&amount=25
 - Swap: POST ${origin}/api/swap {"from_token":"USDC","from_chain":"solana","to_token":"ETH","to_chain":"base","amount":"25","recipient":"0x...","refund_address":"<solana address>","referrer":"myagent.near"}
 - Pay exactly 10 USDC on Base with SOL: POST ${origin}/api/pay {"token":"USDC","chain":"base","amount_out":"10","pay_with_token":"SOL","pay_with_chain":"solana","recipient":"0x...","refund_address":"<solana address>"}
+- Got HTTP 402 (x402)? Decode it: POST ${origin}/api/x402 {"payment_required": <the 402 body>}. Fund it from Solana: add "pay_with_token":"USDC","pay_with_chain":"solana","wallet":"0x<your base wallet>","refund_address":"<solana address>"
 - Track: GET ${origin}/api/status?deposit_address=...&wait_seconds=25
 
 ## Terms
@@ -956,7 +1081,7 @@ function agentCard(origin) {
     defaultOutputModes: ["application/json"],
     interfaces: { mcp: `${origin}/mcp`, rest: `${origin}/api`, openapi: `${origin}/openapi.json` },
     skills: TOOLS.map((t) => ({ id: t.name, name: t.title, description: t.description,
-      tags: ["crypto", "swap", "cross-chain", "bridge", "defi", "payments", "near-intents"] })),
+      tags: ["crypto", "swap", "cross-chain", "bridge", "defi", "payments", "x402", "near-intents"] })),
   };
 }
 
@@ -986,11 +1111,12 @@ table{border-collapse:collapse;width:100%}td{padding:6px 8px;border-top:1px soli
 <h2>Connect in 10 seconds</h2><pre>${origin}/mcp</pre>
 <pre>{ "mcpServers": { "swap-ripper": { "url": "${origin}/mcp" } } }</pre>
 <h2>What agents can do</h2><table>${TOOLS.map((t) => `<tr><td><code>${t.name}</code></td><td>${t.description}</td></tr>`).join("")}</table>
+<h2>Got HTTP 402? Pay it from any chain</h2><p>x402 paywalls usually want USDC on Base, but your agent's money is on Solana, Ethereum or Bitcoin? Pass the 402 response to <code>fund_x402</code>. It reads the invoice and tops up your wallet on the right chain with an exact amount, paid with whatever you hold. Fund once (~$5) and dozens of future 402 calls need no swap.</p>
 <h2>Get paid in any crypto</h2><p>Make a payment link in seconds: your customer pays with whatever coin they hold, and you receive exactly the token you want. <a href="/pay"><b>Create a payment link →</b></a></p>
 <h2>Gas station</h2><p>Out of gas on Base, Arbitrum, Solana or 10 other chains? <code>refuel_gas</code> delivers a few dollars of native gas to any address, paid with any token.</p>
 <h2>Earn by routing swaps</h2><p>Pass <code>referrer: "yourname.near"</code> on any call. You earn <b>1/3 of the fee</b> on every swap you route, paid automatically on-chain. Users pay the same price.</p>
 <h2>REST</h2><pre>GET  ${origin}/api/quote?from_token=USDC&from_chain=solana&to_token=ETH&to_chain=base&amount=25
-POST ${origin}/api/swap      POST ${origin}/api/pay      POST ${origin}/api/compare
+POST ${origin}/api/swap      POST ${origin}/api/pay      POST ${origin}/api/x402      POST ${origin}/api/compare
 GET  ${origin}/api/status?deposit_address=...&wait_seconds=25
 GET  ${origin}/api/prices?symbols=BTC,ETH,SOL</pre>
 <p><a href="/openapi.json">OpenAPI</a> · <a href="/llms.txt">llms.txt</a> · <a href="/.well-known/agent.json">Agent card</a> · <a href="/server.json">MCP registry entry</a> · Humans: <a href="https://t.me/IntentsSwapRipperBot">Telegram bot</a></p>
